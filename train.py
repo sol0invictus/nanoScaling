@@ -13,7 +13,7 @@ To run with DDP on 4 gpus across 2 nodes, example:
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py
 - Run on the worker node:
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
-(If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
+(If your cluster does not have Infiniband interconnect prepend UNUSED_ARGIB_DISABLE=1)
 """
 
 import os
@@ -268,9 +268,6 @@ def get_lr(it):
     return config.min_lr + coeff * (config.learning_rate - config.min_lr)
 
 # logging
-if config.wandb_log and master_process:
-    import wandb
-    wandb.init(project=config.wandb_project, name=config.wandb_run_name, config=config.to_dict())
 
 if config.tensorboard_log and master_process:
     from torch.utils.tensorboard import SummaryWriter
@@ -329,15 +326,7 @@ while True:
     if iter_num % config.eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if config.wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
-                "tokens_seen": tokens_seen,
-            })
+
         if losses['val'] < best_val_loss or config.always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:

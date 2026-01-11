@@ -33,8 +33,7 @@ class ExperimentRunner:
         
         # ensure output dir is set to experiment dir
         cmd.append(f"--out_dir={exp_dir}")
-        # disable wandb for automated runs to avoid clutter (or enable if desired)
-        # cmd.append("--wandb_log=False")
+
         # enable tensorboard with specific run name
         cmd.append(f"--tensorboard_run_name={exp.name}")
         

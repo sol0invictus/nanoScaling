@@ -21,9 +21,6 @@ class ExperimentConfig:
     init_from: str = 'scratch'
     
     # Logging
-    wandb_log: bool = False
-    wandb_project: str = 'owt'
-    wandb_run_name: str = 'gpt2'
     tensorboard_log: bool = True
     tensorboard_run_name: str = 'gpt2_muon'
     
@@ -74,6 +71,26 @@ class ExperimentConfig:
     def from_yaml(cls, path: str):
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
+        
+        # Enforce types based on default values (dataclasses don't auto-convert)
+        # This fixes issues where scientific notation like "6e-4" is loaded as str by PyYAML
+        default_obj = cls()
+        for k, v in data.items():
+            if k == 'parametrization': continue
+            if hasattr(default_obj, k):
+                # Get the type of the default value
+                expected_type = type(getattr(default_obj, k))
+                # Only attempt cast for primitives
+                if expected_type in (int, float, bool, str):
+                    try:
+                        if expected_type == bool and isinstance(v, str):
+                            data[k] = v.lower() == 'true'
+                        elif expected_type != type(v):
+                            data[k] = expected_type(v)
+                            # print(f"Casted {k} from {type(v)} to {expected_type}")
+                    except Exception:
+                        pass
+
         # Handle nested config
         if 'parametrization' in data:
             data['parametrization'] = ParametrizationConfig(**data['parametrization'])
