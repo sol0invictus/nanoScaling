@@ -1,6 +1,6 @@
 import torch
 import math
-from config import ExperimentConfig
+from .config import ExperimentConfig
 
 def apply_parametrization(model: torch.nn.Module, config: ExperimentConfig):
     """

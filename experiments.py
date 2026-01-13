@@ -98,7 +98,7 @@ if __name__ == "__main__":
     # This script is meant to be imported or modified for specific campaigns.
     
     # Example: tiny batch scaling debug
-    runner = ExperimentRunner(base_config_path='config/train_shakespeare_char.py', output_root='experiments_out')
+    runner = ExperimentRunner(base_config_path='configs/train_shakespeare_char.py', output_root='experiments_out')
     
     # We need a base config file. 
     # Let's assume user has one, or we use a dummy one.

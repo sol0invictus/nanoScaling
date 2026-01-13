@@ -426,7 +426,7 @@ class GPT(nn.Module):
         print(f"AdamW params: {len(adamw_params)} tensors, {num_adamw_params:,} parameters")
         
         # import Muon inside here to avoid circular imports if any, or just convenience
-        from muon import Muon
+        from optimizers.muon import Muon
 
         # Create optimizers
         # AdamW for vectors/biases/embeddings (though embeddings are 2D, they are sparse-ish updates usually, but here we strict rank)
