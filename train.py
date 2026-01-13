@@ -239,14 +239,33 @@ def estimate_loss():
     """ Helps estimate an arbitrarily accurate loss over either split using many batches """
     out = {}
     model.eval()
-    for split in ['train', 'val']:
+    
+    # Identify splits to evaluate
+    # Use config.val_splits if provided, otherwise default to ['train', 'val'] (though config default is ['val'])
+    # We always evaluate on 'train' as well.
+    splits = ['train'] + config.val_splits
+    # Remove duplicates
+    splits = sorted(list(set(splits)))
+    
+    for split in splits:
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
-            X, Y = get_batch(split)
+            try:
+                X, Y = get_batch(split)
+            except FileNotFoundError:
+                # e.g. if 'val' split doesn't strictly exist as 'val.bin' or custom logic fails
+                continue
+                
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
-        out[split] = losses.mean()
+        
+        # Clean up key name for log
+        key = split
+        if split.endswith('.bin'):
+            key = split[:-4] # remove .bin
+        out[key] = losses.mean()
+        
     model.train()
     return out
 
@@ -306,12 +325,25 @@ while True:
         param_group['lr'] = lr
 
     # 2. Evaluation and Checkpointing
+    # 2. Evaluation and Checkpointing
     if iter_num % config.eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        
+        loss_msg = f"step {iter_num}:"
+        for k, v in losses.items():
+            loss_msg += f" {k} loss {v:.4f},"
+        print(loss_msg)
+        
+        # Write to TensorBoard
+        if config.tensorboard_log:
+             for k, v in losses.items():
+                 tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
 
-        if losses['val'] < best_val_loss or config.always_save_checkpoint:
-            best_val_loss = losses['val']
+        # Track best 'val' loss (assumes 'val' exists, or use first available)
+        current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
+        
+        if current_val_loss < best_val_loss or config.always_save_checkpoint:
+            best_val_loss = current_val_loss
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),

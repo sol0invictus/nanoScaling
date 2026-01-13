@@ -26,6 +26,7 @@ class ExperimentConfig:
     
     # Data
     dataset: str = 'openwebtext'
+    val_splits: List[str] = field(default_factory=lambda: ['val'])
     gradient_accumulation_steps: int = 5 * 8
     batch_size: int = 12
     block_size: int = 1024
