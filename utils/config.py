@@ -44,7 +44,14 @@ class ExperimentConfig:
     multiple_of: int = 256 # for SwiGLU
     
     # Optimizer
-    optimizer: str = 'adamw' # 'adamw' or 'muon' (or mixed)
+    optimizer: str = 'adamw' # 'adamw' or 'muon' or 'scion'
+    
+    # Scion Optimizer Args
+    scion_norm: str = 'Auto'
+    scion_scale: float = 1.0
+    scion_momentum: float = 1.0
+    scion_unconstrained: bool = False
+    
     learning_rate: float = 6e-4
     max_iters: int = 600000
     weight_decay: float = 1e-1

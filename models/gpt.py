@@ -409,93 +409,106 @@ class GPT(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         """
-        Modified to support Muon optimizer for 2D parameters and AdamW for everything else.
+        Modified to support Scion, Muon optimizer for 2D parameters and AdamW for everything else.
         """
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         
-        # separate parameters for Muon (2D tensors) and AdamW (others)
-        muon_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        adamw_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        
-        num_muon_params = sum(p.numel() for p in muon_params)
-        num_adamw_params = sum(p.numel() for p in adamw_params)
-        print(f"Muon params: {len(muon_params)} tensors, {num_muon_params:,} parameters")
-        print(f"AdamW params: {len(adamw_params)} tensors, {num_adamw_params:,} parameters")
-        
-        # import Muon inside here to avoid circular imports if any, or just convenience
-        from optimizers.muon import Muon
+        optimizer_name = getattr(self.config, 'optimizer', 'adamw').lower()
+        print(f"Configuring optimizer: {optimizer_name}")
 
-        # Create optimizers
-        # AdamW for vectors/biases/embeddings (though embeddings are 2D, they are sparse-ish updates usually, but here we strict rank)
-        # Note: typically embeddings are 2D but Muon specific implementation checks for 2D.
-        # If we stick to the rule: 2D -> Muon, then embeddings get Muon.
-        # However, reference implementation often puts embeddings in AdamW. 
-        # For simplicity and adherence to "2D hidden layers", let's refine:
-        # Muon usually for: linear weights, attention weights (2D).
-        # AdamW for: layer norm weights (1D), biases (1D), embeddings (2D).
-        
-        # Let's adjust the filtering to be more precise if needed, or stick to simple >2D rule if Muon handles it well.
-        # The provided Muon implementation `zeropower_via_newtonschulz5` works on 2D. 
-        # Embeddings are 2D (vocab_size, n_embd). Muon on embeddings might be too aggressive or slow.
-        # Let's put embeddings in AdamW explicitly.
-        
-        muon_params = []
-        adamw_params = []
-        seen = set()
-        for n, p in param_dict.items():
-            if p in seen:
-                continue
-            seen.add(p)
-            # embeddings and 1D tensors go to AdamW
-            if p.dim() < 2 or 'wte' in n or 'wpe' in n:
-                adamw_params.append(p)
-            else:
-                muon_params.append(p)
+        if optimizer_name == 'adamw':
+            # Create optimizers
+            # All parameters use AdamW
+            optim_groups = [
+                {'params': param_dict.values(), 'weight_decay': weight_decay}
+            ]
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+            return optimizer
 
-        optim_groups = [
-            {'params': muon_params, 'lr': 0.02}, # Muon typical learning rate is 0.02 or similar
-            {'params': adamw_params, 'lr': learning_rate, 'weight_decay': weight_decay}
-        ]
-        
-        # We need to return a list of optimizers or a wrapper. 
-        # Since train.py expects a single optimizer with .step() and .zero_grad(),
-        # we can wrap them.
-        
-        class CombinedOptimizer:
-            def __init__(self, optimizers):
-                self.optimizers = optimizers
-                self.param_groups = []
-                for opt in optimizers:
-                    self.param_groups.extend(opt.param_groups)
+        elif optimizer_name in ['muon', 'scion']:
+            # separate parameters for Specialized Optimizer (2D tensors) and AdamW (others)
+            # 2D tensors -> Specialized (Muon/Scion)
+            # Embeddings/1D -> AdamW
             
-            def step(self):
-                for opt in self.optimizers:
-                    opt.step()
+            special_params = []
+            adamw_params = []
+            seen = set()
+            for n, p in param_dict.items():
+                if p in seen:
+                    continue
+                seen.add(p)
+                # embeddings and 1D tensors go to AdamW
+                if p.dim() < 2 or 'wte' in n or 'wpe' in n:
+                    adamw_params.append(p)
+                else:
+                    special_params.append(p)
             
-            def zero_grad(self, set_to_none=True):
-                for opt in self.optimizers:
-                    opt.zero_grad(set_to_none=set_to_none)
+            num_special_params = sum(p.numel() for p in special_params)
+            num_adamw_params = sum(p.numel() for p in adamw_params)
+            print(f"{optimizer_name.capitalize()} params: {len(special_params)} tensors, {num_special_params:,} parameters")
+            print(f"AdamW params: {len(adamw_params)} tensors, {num_adamw_params:,} parameters")
             
-            def state_dict(self):
-                return [opt.state_dict() for opt in self.optimizers]
-            
-            def load_state_dict(self, state_dicts):
-                for opt, state_dict in zip(self.optimizers, state_dicts):
-                    opt.load_state_dict(state_dict)
+            # AdamW for the rest
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer2 = torch.optim.AdamW(adamw_params, lr=learning_rate, betas=betas, weight_decay=weight_decay, **extra_args)
 
-        optimizer1 = Muon(muon_params, lr=0.02, momentum=0.95)
+            if optimizer_name == 'muon':
+                from optimizers.muon import Muon
+                # Muon defaults: lr=0.02, momentum=0.95
+                optimizer1 = Muon(special_params, lr=0.02, momentum=0.95)
+            elif optimizer_name == 'scion':
+                from optimizers.scion import Scion
+                # Scion defaults from config or defaults
+                scion_norm = getattr(self.config, 'scion_norm', 'Auto')
+                scion_scale = getattr(self.config, 'scion_scale', 1.0)
+                scion_momentum = getattr(self.config, 'scion_momentum', 1.0)
+                scion_unconstrained = getattr(self.config, 'scion_unconstrained', False)
+                # Scion LR usually decoupled or similar to Muon? The paper/code defaults to 1e-3. 
+                # Or we can use the main learning rate? 
+                # Usually these orthogonal optimizers use a specific LR.
+                # Let's use `learning_rate` or a fixed one if it's vastly different.
+                # Muon uses fixed 0.02. Scion example uses 2**-12 approx 2e-4.
+                # Let's use the provided `learning_rate` but maybe scaled?
+                # Actually, Scion paper says "step size alpha_t" which is LR.
+                # Let's use the config LR.
+                optimizer1 = Scion(special_params, lr=learning_rate, momentum=scion_momentum, 
+                                   norm=scion_norm, scale=scion_scale, unconstrained=scion_unconstrained)
+            
+            class CombinedOptimizer:
+                def __init__(self, optimizers):
+                    self.optimizers = optimizers
+                    self.param_groups = []
+                    for opt in optimizers:
+                        self.param_groups.extend(opt.param_groups)
+                
+                def step(self):
+                    for opt in self.optimizers:
+                        opt.step()
+                
+                def zero_grad(self, set_to_none=True):
+                    for opt in self.optimizers:
+                        opt.zero_grad(set_to_none=set_to_none)
+                
+                def state_dict(self):
+                    return [opt.state_dict() for opt in self.optimizers]
+                
+                def load_state_dict(self, state_dicts):
+                    for opt, state_dict in zip(self.optimizers, state_dicts):
+                        opt.load_state_dict(state_dict)
+
+            return CombinedOptimizer([optimizer1, optimizer2])
         
-        # AdamW for the rest
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer2 = torch.optim.AdamW(adamw_params, lr=learning_rate, betas=betas, weight_decay=weight_decay, **extra_args)
-        
-        print(f"using fused AdamW: {use_fused}")
-        return CombinedOptimizer([optimizer1, optimizer2])
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
