@@ -1,0 +1,34 @@
+# MoE Configuration
+out_dir: "out-moe"
+eval_interval: 20
+log_interval: 1
+eval_iters: 10
+eval_only: False
+always_save_checkpoint: True
+init_from: "scratch"
+
+dataset: "sft_dummy"
+gradient_accumulation_steps: 1
+batch_size: 4
+block_size: 1024
+
+# MoE Settings
+use_moe: True
+num_experts: 4
+num_experts_per_token: 2
+moe_every: 2 # Apply MoE every 2 layers (0, 2...)
+
+# Model (Small for testing)
+n_layer: 4
+n_head: 4
+n_embd: 128
+dropout: 0.1
+
+learning_rate: 1e-4
+max_iters: 100
+warmup_iters: 10
+lr_decay_iters: 100
+min_lr: 1e-5
+
+device: "cuda"
+compile: False

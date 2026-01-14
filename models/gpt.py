@@ -31,6 +31,110 @@ class RMSNorm(nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
+class Router(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.top_k = config.num_experts_per_token
+        self.loss_weight = getattr(config, 'moe_loss_weight', 0.01)
+        self.linear = nn.Linear(config.n_embd, self.num_experts, bias=False)
+
+    def forward(self, x):
+        # x: (B, T, C)
+        # logits: (B, T, num_experts)
+        logits = self.linear(x)
+        
+        # Calculate routing weights and indices
+        top_k_logits, indices = torch.topk(logits, self.top_k, dim=-1)
+        weights = F.softmax(top_k_logits, dim=-1)
+        
+        # Aux loss (load balancing)
+        probs = F.softmax(logits, dim=-1) # (B, T, E)
+        
+        # Minimizing variance of importance (sum of probabilities per expert)
+        # Target probability for each expert is 1/N
+        target = 1.0 / self.num_experts
+        
+        # Switch Transformer Load Balancing Loss
+        # density: fraction of tokens selected for each expert
+        # indices: (B, T, k)
+        # We want to count how many times each expert is selected
+        # Flatten indices
+        all_indices = indices.view(-1)
+        # Count occurrences (histogram)
+        # Note: bincount is not differentiable, but we don't need differentiation through density for this loss term
+        # (gradient flows through importance/probs)
+        expert_counts = torch.bincount(all_indices, minlength=self.num_experts).float()
+        density = expert_counts / all_indices.numel()
+        
+        # importance: mean probability assigned to expert across batch
+        # probs: (B, T, E) -> mean over B,T -> (E)
+        importance = probs.view(-1, self.num_experts).mean(0)
+        
+        # Loss = weight * N * sum(density * importance)
+        # We want both to be close to 1/N.
+        # If perfectly balanced, density = 1/N, importance = 1/N. Sum = N * 1/N^2 = 1/N.
+        # Scaled by N, becomes 1. Minimal value is 1.
+        
+        aux_loss = self.loss_weight * self.num_experts * (density * importance).sum()
+        
+        return weights, indices, aux_loss
+
+class MoELayer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.experts = nn.ModuleList([
+            SwiGLUMLP(config) if getattr(config, 'use_swiglu', False) else MLP(config)
+            for _ in range(self.num_experts)
+        ])
+        self.router = Router(config)
+
+    def forward(self, x):
+        B, T, C = x.size()
+        weights, indices, aux_loss = self.router(x)
+        
+        # weights: (B, T, k)
+        # indices: (B, T, k)
+        
+        x_flat = x.view(-1, C)
+        out_flat = torch.zeros_like(x_flat)
+        
+        # Flatten batch/time
+        k = indices.shape[-1]
+        indices_flat = indices.view(-1, k)
+        weights_flat = weights.view(-1, k)
+        
+        # Iterate over experts (naive but effective for small num_experts)
+        for expert_idx in range(self.num_experts):
+            # Find tokens that selected this expert
+            # Mask (N, k)
+            mask = (indices_flat == expert_idx)
+            
+            # (row_idx, col_idx) tuples such that indices_flat[row_idx, col_idx] == expert_idx
+            rows, cols = torch.where(mask)
+            
+            if rows.numel() == 0:
+                continue
+                
+            # Gather inputs: x_flat[rows]
+            expert_inputs = x_flat[rows]
+            
+            # Forward
+            expert_out = self.experts[expert_idx](expert_inputs)
+            
+            # Weighting
+            # weight for this selection: weights_flat[rows, cols]
+            expert_weights = weights_flat[rows, cols].unsqueeze(1) # (M, 1)
+            
+            # Accumulate
+            # We add to out_flat at rows indices.
+            # out_flat[rows] += expert_out * expert_weights
+            # Usually index_add is safer if same row appears multiple times (unlikely with top-k unique)
+            out_flat.index_add_(0, rows, expert_out * expert_weights)
+            
+        return out_flat.view(B, T, C), aux_loss
+
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
@@ -223,7 +327,7 @@ class SwiGLUMLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         # Use RMSNorm if configured
         norm_class = RMSNorm if getattr(config, 'use_rmsnorm', False) else LayerNorm
@@ -233,15 +337,33 @@ class Block(nn.Module):
         
         self.ln_2 = norm_class(config.n_embd, eps=1e-5 if getattr(config, 'use_rmsnorm', False) else 1e-5)
         
-        if getattr(config, 'use_swiglu', False):
+        # MoE logic
+        self.use_moe = False
+        if getattr(config, 'use_moe', False):
+             moe_every = getattr(config, 'moe_every', 1)
+             # Use layer_idx if available, otherwise apply always (or default 0/none?)
+             # If layer_idx is None, we assume standard behavior (maybe valid for single block tests)
+             # But GPT passes layer_idx.
+             if layer_idx is not None and layer_idx % moe_every == 0:
+                 self.use_moe = True
+                 
+        if self.use_moe:
+            self.mlp = MoELayer(config)
+        elif getattr(config, 'use_swiglu', False):
              self.mlp = SwiGLUMLP(config)
         else:
              self.mlp = MLP(config)
 
     def forward(self, x, attn_mask=None):
         x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
-        x = x + self.mlp(self.ln_2(x))
-        return x
+        
+        if self.use_moe:
+            mlp_out, aux_loss = self.mlp(self.ln_2(x))
+            x = x + mlp_out
+            return x, aux_loss
+        else:
+            x = x + self.mlp(self.ln_2(x))
+            return x, 0.0
 
 @dataclass
 class GPTConfig:
@@ -257,6 +379,13 @@ class GPTConfig:
     use_rope: bool = False
     use_swiglu: bool = False
     multiple_of: int = 256 # for SwiGLU rounding
+    # MoE
+    use_moe: bool = False
+    num_experts: int = 8
+    num_experts_per_token: int = 2
+    moe_every: int = 2
+    moe_loss_weight: float = 0.01
+
 
 
 class GPT(nn.Module):
@@ -271,7 +400,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd) if not getattr(config, 'use_rope', False) else None,
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
             ln_f = (RMSNorm if getattr(config, 'use_rmsnorm', False) else LayerNorm)(config.n_embd, eps=1e-5 if getattr(config, 'use_rmsnorm', False) else 1e-5),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -326,14 +455,18 @@ class GPT(nn.Module):
         else:
              x = self.transformer.drop(tok_emb)
              
+        total_aux_loss = 0.0
         for block in self.transformer.h:
-            x = block(x, attn_mask=attn_mask)
+            x, aux_loss = block(x, attn_mask=attn_mask)
+            total_aux_loss += aux_loss
+            
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss += total_aux_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim

@@ -44,6 +44,15 @@ class ExperimentConfig:
     use_swiglu: bool = True
     multiple_of: int = 256 # for SwiGLU
     
+    # MoE
+    use_moe: bool = False
+    num_experts: int = 8
+    num_experts_per_token: int = 2
+    moe_every: int = 2 # Apply MoE every N layers (2 means 0, 2, 4...)
+    moe_loss_weight: float = 0.01
+
+
+    
     # Optimizer
     optimizer: str = 'adamw' # 'adamw' or 'muon' or 'scion'
     
