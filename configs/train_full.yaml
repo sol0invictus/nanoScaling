@@ -3,20 +3,20 @@
 # -----------------------------------------------------------------------------
 
 # I/O
-out_dir: 'out'
+out_dir: "out"
 eval_interval: 2000
 log_interval: 1
 eval_iters: 200
 eval_only: false
 always_save_checkpoint: true
-init_from: 'scratch' # 'scratch', 'resume', 'gpt2*'
+init_from: "scratch" # 'scratch', 'resume', 'gpt2*'
 
 # Logging
 tensorboard_log: true
-tensorboard_run_name: 'gpt2_full_config_run'
+tensorboard_run_name: "gpt2_full_config_run"
 
 # Data
-dataset: 'shakespeare' # 'shakespeare', 'openwebtext'
+dataset: "openwebtext" # 'shakespeare', 'openwebtext'
 gradient_accumulation_steps: 40 # 5 * 8 (example)
 batch_size: 12
 block_size: 1024
@@ -35,7 +35,7 @@ use_swiglu: true
 multiple_of: 256 # for SwiGLU
 
 # Optimizer
-optimizer: 'adamw' # 'adamw', 'muon'
+optimizer: "muon" # 'adamw', 'muon'
 learning_rate: 3e-3
 max_iters: 2000
 weight_decay: 1e-1
@@ -50,12 +50,12 @@ lr_decay_iters: 600000
 min_lr: 6e-5
 
 # System
-device: 'cuda'
-dtype: 'bfloat16' # 'float32', 'bfloat16', 'float16'
+device: "cuda"
+dtype: "bfloat16" # 'float32', 'bfloat16', 'float16'
 compile: false
-backend: 'nccl'
+backend: "nccl"
 
 # Parametrization
 # Controls initialization and learning rate scaling logic.
 parametrization:
-  mode: 'SP' # 'SP' (Standard), 'MuP' (Maximal Update), 'CompleteP'
+  mode: "SP" # 'SP' (Standard), 'MuP' (Maximal Update), 'CompleteP'
