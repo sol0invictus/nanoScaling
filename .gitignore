@@ -13,3 +13,5 @@ venv/
 experiments_out/
 out/
 wandb/
+research_plan/
+CLAUDE.md

@@ -218,6 +218,55 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
+
+class FixedRMSNorm(nn.Module):
+    """RMSNorm without learnable affine parameters (for norm_affine=False ablations)."""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+
+class FixedLayerNorm(nn.Module):
+    """LayerNorm without learnable affine parameters (for norm_affine=False ablations)."""
+    def __init__(self, ndim: int, eps: float = 1e-5):
+        super().__init__()
+        self.ndim = ndim
+        self.eps = eps
+
+    def forward(self, x):
+        return F.layer_norm(x, (self.ndim,), None, None, self.eps)
+
+
+def build_norm(config, for_final_ln: bool = False) -> nn.Module:
+    """
+    Build the appropriate normalization module based on config.
+
+    norm_position='pre'  → actual norm inside blocks; actual norm for ln_f
+    norm_position='post' → actual norm inside blocks (applied after residual);
+                           nn.Identity() for ln_f (blocks already normalize output)
+    norm_position='none' → nn.Identity() everywhere
+    norm_affine=False    → FixedRMSNorm / FixedLayerNorm (no learnable gamma/beta)
+    """
+    norm_position = getattr(config, 'norm_position', 'pre')
+    norm_affine = getattr(config, 'norm_affine', True)
+    use_rmsnorm = getattr(config, 'use_rmsnorm', False)
+    n_embd = config.n_embd
+    bias = getattr(config, 'bias', False)
+
+    if norm_position == 'none':
+        return nn.Identity()
+    if for_final_ln and norm_position == 'post':
+        # Post-LN blocks already normalize their output; final ln_f is redundant
+        return nn.Identity()
+
+    if not norm_affine:
+        return FixedRMSNorm(n_embd) if use_rmsnorm else FixedLayerNorm(n_embd)
+    else:
+        return RMSNorm(n_embd) if use_rmsnorm else LayerNorm(n_embd, bias=bias)
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -329,13 +378,10 @@ class Block(nn.Module):
 
     def __init__(self, config, layer_idx=None):
         super().__init__()
-        # Use RMSNorm if configured
-        norm_class = RMSNorm if getattr(config, 'use_rmsnorm', False) else LayerNorm
-        self.ln_1 = norm_class(config.n_embd, eps=1e-5 if getattr(config, 'use_rmsnorm', False) else 1e-5) # RMSNorm usually has small eps
-        
+        self._norm_position = getattr(config, 'norm_position', 'pre')
+        self.ln_1 = build_norm(config)
         self.attn = CausalSelfAttention(config)
-        
-        self.ln_2 = norm_class(config.n_embd, eps=1e-5 if getattr(config, 'use_rmsnorm', False) else 1e-5)
+        self.ln_2 = build_norm(config)
         
         # MoE logic
         self.use_moe = False
@@ -355,15 +401,26 @@ class Block(nn.Module):
              self.mlp = MLP(config)
 
     def forward(self, x, attn_mask=None):
-        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
-        
-        if self.use_moe:
-            mlp_out, aux_loss = self.mlp(self.ln_2(x))
-            x = x + mlp_out
-            return x, aux_loss
+        if self._norm_position == 'post':
+            # Post-LN: norm applied after residual addition
+            x = self.ln_1(x + self.attn(x, attn_mask=attn_mask))
+            if self.use_moe:
+                mlp_out, aux_loss = self.mlp(x)
+                x = self.ln_2(x + mlp_out)
+                return x, aux_loss
+            else:
+                x = self.ln_2(x + self.mlp(x))
+                return x, 0.0
         else:
-            x = x + self.mlp(self.ln_2(x))
-            return x, 0.0
+            # Pre-LN or No-Norm (ln_1/ln_2 are nn.Identity when norm_position='none')
+            x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
+            if self.use_moe:
+                mlp_out, aux_loss = self.mlp(self.ln_2(x))
+                x = x + mlp_out
+                return x, aux_loss
+            else:
+                x = x + self.mlp(self.ln_2(x))
+                return x, 0.0
 
 @dataclass
 class GPTConfig:
@@ -374,17 +431,26 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    # New features
+    # Architecture features
     use_rmsnorm: bool = False
     use_rope: bool = False
     use_swiglu: bool = False
     multiple_of: int = 256 # for SwiGLU rounding
+    # Normalization ablations (RQ2)
+    norm_position: str = 'pre'   # 'pre' (Pre-LN), 'post' (Post-LN), 'none' (no normalization)
+    norm_affine: bool = True     # whether norm layers have learnable gamma/beta
+    norm_free_scaled_init: bool = False  # tighter residual init for norm-free training
     # MoE
     use_moe: bool = False
     num_experts: int = 8
     num_experts_per_token: int = 2
     moe_every: int = 2
     moe_loss_weight: float = 0.01
+    # Optimizer params (used by configure_optimizers)
+    optimizer: str = 'adamw'
+    muon_lr: float = 0.02
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
 
 
 
@@ -401,7 +467,7 @@ class GPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd) if not getattr(config, 'use_rope', False) else None,
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
-            ln_f = (RMSNorm if getattr(config, 'use_rmsnorm', False) else LayerNorm)(config.n_embd, eps=1e-5 if getattr(config, 'use_rmsnorm', False) else 1e-5),
+            ln_f = build_norm(config, for_final_ln=True),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
@@ -412,10 +478,16 @@ class GPT(nn.Module):
 
         # init all weights
         self.apply(self._init_weights)
-        # apply special scaled init to the residual projections, per GPT-2 paper
+        # Apply special scaled init to residual projections (per GPT-2 paper).
+        # norm_free_scaled_init uses a tighter scale (1/n_layer vs 1/sqrt(2*n_layer))
+        # to compensate for the lack of normalization layers in activation paths.
+        if getattr(config, 'norm_free_scaled_init', False):
+            resid_std = 0.02 / math.sqrt(config.n_layer)
+        else:
+            resid_std = 0.02 / math.sqrt(2 * config.n_layer)
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                torch.nn.init.normal_(p, mean=0.0, std=resid_std)
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
@@ -601,8 +673,10 @@ class GPT(nn.Module):
 
             if optimizer_name == 'muon':
                 from optimizers.muon import Muon
-                # Muon defaults: lr=0.02, momentum=0.95
-                optimizer1 = Muon(special_params, lr=0.02, momentum=0.95)
+                muon_lr = getattr(self.config, 'muon_lr', 0.02)
+                muon_momentum = getattr(self.config, 'muon_momentum', 0.95)
+                muon_ns_steps = getattr(self.config, 'muon_ns_steps', 5)
+                optimizer1 = Muon(special_params, lr=muon_lr, momentum=muon_momentum, ns_steps=muon_ns_steps)
             elif optimizer_name == 'scion':
                 from optimizers.scion import Scion
                 # Scion defaults from config or defaults

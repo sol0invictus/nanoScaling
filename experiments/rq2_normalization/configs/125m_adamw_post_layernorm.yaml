@@ -1,0 +1,51 @@
+# RQ2 Condition 3/6: AdamW + Post-LayerNorm
+# H2b hypothesis: AdamW unstable at depth ≥12 with Post-LN.
+# norm_position=post → norm applied AFTER residual addition inside each block.
+# ln_f is identity (blocks already normalize output).
+
+out_dir: out/rq2/125m_adamw_post_layernorm
+tensorboard_run_name: rq2_125m_adamw_post_layernorm
+tensorboard_log: true
+
+dataset: shakespeare_char
+# dataset: openwebtext
+
+n_layer: 12
+n_head: 12
+n_embd: 768
+block_size: 1024
+bias: true
+dropout: 0.0
+
+use_rmsnorm: false
+use_rope: true
+use_swiglu: true
+
+norm_position: post   # ← Post-LN
+norm_affine: true
+norm_free_scaled_init: false
+
+optimizer: adamw
+learning_rate: 3e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+decay_lr: true
+warmup_iters: 400
+lr_decay_iters: 20000
+min_lr: 3e-5
+
+batch_size: 12
+gradient_accumulation_steps: 40
+max_iters: 20000
+
+eval_interval: 500
+log_interval: 10
+eval_iters: 100
+always_save_checkpoint: true
+
+device: cuda
+dtype: bfloat16
+compile: false

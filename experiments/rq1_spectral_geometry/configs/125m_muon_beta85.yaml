@@ -1,0 +1,51 @@
+# RQ1 Ablation: Muon with momentum β=0.85 (lower momentum)
+# Tests interaction between momentum and spectral control.
+# Lower β reduces the contribution of past gradients in the Nesterov buffer.
+
+out_dir: out/rq1/125m_muon_beta85
+tensorboard_run_name: rq1_125m_muon_beta85
+tensorboard_log: true
+
+dataset: shakespeare_char
+# dataset: openwebtext
+
+n_layer: 12
+n_head: 12
+n_embd: 768
+block_size: 1024
+bias: false
+dropout: 0.0
+
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+norm_position: pre
+norm_affine: true
+
+optimizer: muon
+muon_lr: 0.02
+muon_momentum: 0.85   # ← ablation: lower momentum (default is 0.95)
+muon_ns_steps: 5
+learning_rate: 3e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+decay_lr: true
+warmup_iters: 800
+lr_decay_iters: 40000
+min_lr: 3e-5
+
+batch_size: 12
+gradient_accumulation_steps: 40
+max_iters: 40000
+
+eval_interval: 500
+log_interval: 10
+eval_iters: 100
+always_save_checkpoint: true
+
+device: cuda
+dtype: bfloat16
+compile: false

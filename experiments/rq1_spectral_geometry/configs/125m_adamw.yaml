@@ -1,0 +1,59 @@
+# RQ1 Baseline: 125M AdamW + Pre-RMSNorm
+# Trains to 20B tokens (~40K iters at ~512K tokens/iter).
+# For quick iteration use max_iters=1000 and dataset=shakespeare_char.
+
+out_dir: out/rq1/125m_adamw
+tensorboard_run_name: rq1_125m_adamw
+tensorboard_log: true
+
+# Dataset — switch to openwebtext for full experiments
+dataset: shakespeare_char
+# dataset: openwebtext
+
+# Model — 125M (GPT-2 small)
+n_layer: 12
+n_head: 12
+n_embd: 768
+block_size: 1024
+bias: false
+dropout: 0.0
+
+# Modern architecture
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+
+# Normalization (standard Pre-LN with affine)
+norm_position: pre
+norm_affine: true
+
+# Optimizer: AdamW
+optimizer: adamw
+learning_rate: 3e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+# LR schedule: cosine decay with 2% warmup
+decay_lr: true
+warmup_iters: 800       # ~2% of 40K
+lr_decay_iters: 40000
+min_lr: 3e-5            # 10% of peak LR
+
+# Training duration: 20B tokens at ~512K tokens/iter = 40K iters
+# batch_size * gradient_accumulation_steps * block_size ≈ 512K
+batch_size: 12
+gradient_accumulation_steps: 40
+max_iters: 40000
+
+# Checkpointing
+eval_interval: 500
+log_interval: 10
+eval_iters: 100
+always_save_checkpoint: true
+
+# System
+device: cuda
+dtype: bfloat16
+compile: false

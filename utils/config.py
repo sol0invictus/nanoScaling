@@ -53,15 +53,25 @@ class ExperimentConfig:
 
 
     
+    # Normalization (for RQ2 ablations)
+    norm_position: str = 'pre'   # 'pre' (Pre-LN), 'post' (Post-LN), 'none' (no normalization)
+    norm_affine: bool = True     # whether norm layers have learnable gamma/beta
+    norm_free_scaled_init: bool = False  # tighter residual init for norm-free training
+
     # Optimizer
     optimizer: str = 'adamw' # 'adamw' or 'muon' or 'scion'
-    
+
+    # Muon Optimizer Args
+    muon_lr: float = 0.02
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
+
     # Scion Optimizer Args
     scion_norm: str = 'Auto'
     scion_scale: float = 1.0
     scion_momentum: float = 1.0
     scion_unconstrained: bool = False
-    
+
     learning_rate: float = 6e-4
     max_iters: int = 600000
     weight_decay: float = 1e-1

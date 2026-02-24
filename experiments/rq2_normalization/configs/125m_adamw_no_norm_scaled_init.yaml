@@ -1,0 +1,51 @@
+# RQ2 Condition 5/6: AdamW + No Norm + Scaled Init
+# Controls for initialization effects in norm-free training.
+# norm_free_scaled_init=true uses std=0.02/sqrt(n_layer) for residual projections
+# instead of the default 0.02/sqrt(2*n_layer), providing a tighter initial scale.
+
+out_dir: out/rq2/125m_adamw_no_norm_scaled_init
+tensorboard_run_name: rq2_125m_adamw_no_norm_scaled_init
+tensorboard_log: true
+
+dataset: shakespeare_char
+# dataset: openwebtext
+
+n_layer: 12
+n_head: 12
+n_embd: 768
+block_size: 1024
+bias: false
+dropout: 0.0
+
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+
+norm_position: none
+norm_affine: true
+norm_free_scaled_init: true   # ← tighter residual init (std=0.02/sqrt(n_layer))
+
+optimizer: adamw
+learning_rate: 3e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+decay_lr: true
+warmup_iters: 400
+lr_decay_iters: 20000
+min_lr: 3e-5
+
+batch_size: 12
+gradient_accumulation_steps: 40
+max_iters: 20000
+
+eval_interval: 500
+log_interval: 10
+eval_iters: 100
+always_save_checkpoint: true
+
+device: cuda
+dtype: bfloat16
+compile: false
