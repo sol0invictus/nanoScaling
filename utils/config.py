@@ -47,9 +47,13 @@ class ExperimentConfig:
     # MoE
     use_moe: bool = False
     num_experts: int = 8
-    num_experts_per_token: int = 2
-    moe_every: int = 2 # Apply MoE every N layers (2 means 0, 2, 4...)
-    moe_loss_weight: float = 0.01
+    num_experts_per_tok: int = 2
+    moe_every: int = 2  # Apply MoE every N layers (2 means 0, 2, 4...)
+    norm_topk_prob: bool = True
+    load_balance_loss_weight: float = 0.01
+    router_z_loss_weight: float = 0.001
+    moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
+    moe_block_size: int = 128    # Triton tile size for block-sparse kernels
 
 
     
