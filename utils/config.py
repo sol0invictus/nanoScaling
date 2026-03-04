@@ -2,8 +2,6 @@ import yaml
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
-from utils.research_config import ResearchConfig
-
 @dataclass
 class ParametrizationConfig:
     mode: str = 'SP' # 'SP', 'MuP', 'CompleteP'
@@ -107,9 +105,6 @@ class ExperimentConfig:
     # Parametrization
     parametrization: ParametrizationConfig = field(default_factory=ParametrizationConfig)
 
-    # Research / Experiment Logging (see utils/research_config.py)
-    research: ResearchConfig = field(default_factory=ResearchConfig)
-
     @classmethod
     def from_yaml(cls, path: str):
         with open(path, 'r') as f:
@@ -119,7 +114,7 @@ class ExperimentConfig:
         # This fixes issues where scientific notation like "6e-4" is loaded as str by PyYAML
         default_obj = cls()
         for k, v in data.items():
-            if k in ('parametrization', 'research'): continue
+            if k == 'parametrization': continue
             if hasattr(default_obj, k):
                 # Get the type of the default value
                 expected_type = type(getattr(default_obj, k))
@@ -134,11 +129,9 @@ class ExperimentConfig:
                     except Exception:
                         pass
 
-        # Handle nested configs
+        # Handle nested config
         if 'parametrization' in data:
             data['parametrization'] = ParametrizationConfig(**data['parametrization'])
-        if 'research' in data:
-            data['research'] = ResearchConfig(**data['research'])
         return cls(**data)
 
     def to_dict(self):
@@ -146,6 +139,4 @@ class ExperimentConfig:
         d = vars(self).copy()
         if isinstance(d['parametrization'], ParametrizationConfig):
             d['parametrization'] = vars(d['parametrization'])
-        if isinstance(d['research'], ResearchConfig):
-            d['research'] = vars(d['research'])
         return d

@@ -12,7 +12,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TRAIN="$PROJECT_ROOT/train.py"
+TRAIN="$SCRIPT_DIR/train.py"
 
 QUICK_ARGS=""
 if [[ "$1" == "--quick" ]]; then

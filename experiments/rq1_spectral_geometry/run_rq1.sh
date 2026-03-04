@@ -12,7 +12,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TRAIN="$PROJECT_ROOT/train.py"
+TRAIN="$SCRIPT_DIR/train.py"
 
 QUICK_ARGS=""
 if [[ "$1" == "--quick" ]]; then
@@ -31,16 +31,16 @@ run() {
 }
 
 # ---- Baselines ----
-# run "$SCRIPT_DIR/configs/125m_adamw.yaml"
+run "$SCRIPT_DIR/configs/125m_adamw.yaml"
 run "$SCRIPT_DIR/configs/125m_muon.yaml"
 
-# # ---- Newton-Schulz ablations ----
-# run "$SCRIPT_DIR/configs/125m_muon_ns3.yaml"
-# run "$SCRIPT_DIR/configs/125m_muon_ns10.yaml"
+# ---- Newton-Schulz ablations ----
+run "$SCRIPT_DIR/configs/125m_muon_ns3.yaml"
+run "$SCRIPT_DIR/configs/125m_muon_ns10.yaml"
 
-# # ---- Momentum ablation ----
-# run "$SCRIPT_DIR/configs/125m_muon_beta85.yaml"
+# ---- Momentum ablation ----
+run "$SCRIPT_DIR/configs/125m_muon_beta85.yaml"
 
-# echo ""
-# echo "All RQ1 runs complete. Results in out/rq1/"
-# echo "Launch TensorBoard with: tensorboard --logdir out/rq1"
+echo ""
+echo "All RQ1 runs complete. Results in out/rq1/"
+echo "Launch TensorBoard with: tensorboard --logdir out/rq1"

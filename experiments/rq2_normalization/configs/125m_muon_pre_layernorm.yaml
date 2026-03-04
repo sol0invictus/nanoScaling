@@ -49,10 +49,3 @@ always_save_checkpoint: true
 device: cuda
 dtype: bfloat16
 compile: false
-
-# Research / experiment logging (see utils/research_config.py)
-research:
-  enable_spectral_logging: true
-  enable_stability_monitor: true
-  proportional_lr_decay: true
-  svd_checkpoint_freq: 2000
