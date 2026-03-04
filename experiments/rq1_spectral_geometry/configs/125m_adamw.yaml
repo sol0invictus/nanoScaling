@@ -7,7 +7,7 @@ tensorboard_run_name: rq1_125m_adamw
 tensorboard_log: true
 
 # Dataset — switch to openwebtext for full experiments
-dataset: shakespeare_char
+dataset: /home/nanoScaling/data/shakespeare
 # dataset: openwebtext
 
 # Model — 125M (GPT-2 small)
@@ -44,8 +44,8 @@ min_lr: 3e-5            # 10% of peak LR
 # Training duration: 20B tokens at ~512K tokens/iter = 40K iters
 # batch_size * gradient_accumulation_steps * block_size ≈ 512K
 batch_size: 12
-gradient_accumulation_steps: 40
-max_iters: 40000
+gradient_accumulation_steps: 10
+max_iters: 100
 
 # Checkpointing
 eval_interval: 500
@@ -57,3 +57,9 @@ always_save_checkpoint: true
 device: cuda
 dtype: bfloat16
 compile: false
+
+# Research / experiment logging (see utils/research_config.py)
+research:
+  enable_spectral_logging: true
+  proportional_lr_decay: false
+  svd_checkpoint_freq: 2000

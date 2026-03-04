@@ -5,7 +5,7 @@ out_dir: out/rq1/125m_muon_ns10
 tensorboard_run_name: rq1_125m_muon_ns10
 tensorboard_log: true
 
-dataset: shakespeare_char
+dataset: /home/nanoScaling/data/shakespeare
 # dataset: openwebtext
 
 n_layer: 12
@@ -48,3 +48,9 @@ always_save_checkpoint: true
 device: cuda
 dtype: bfloat16
 compile: false
+
+# Research / experiment logging (see utils/research_config.py)
+research:
+  enable_spectral_logging: true
+  proportional_lr_decay: true
+  svd_checkpoint_freq: 2000

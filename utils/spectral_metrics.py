@@ -3,26 +3,27 @@ Spectral Dynamics Logger — measurement infrastructure for RQ1 / RQ2 / RQ4.
 
 Implements the full measurement toolkit from the Muon research proposal:
 
-Per-step cheap metrics (every grad_freq / spectral_freq steps):
-  - Stable rank:              ||W||_F² / ||W||_2²
-  - Per-layer gradient Frobenius norm and spectral norm
-  - Gradient direction cosine similarity (consecutive steps)
+All metrics fire together every time log_step() is called (no internal freq gating).
+Call it from the training loop at log_interval cadence. The only separate gate is
+sharpness_freq, since sharpness requires N full forward passes.
 
-Medium-frequency metrics (every topk_svd_freq steps, top-k SVD):
+Per-call metrics (weight matrices):
+  - Stable rank:              ||W||_F² / ||W||_2²
+  - Per-layer gradient Frobenius norm, spectral norm, direction cosine
   - Nuclear / Frobenius ratio: ||W||_* / ||W||_F
   - Spectral entropy H(W) = -Σ p_i log p_i  where p_i = σ_i² / Σ σ_j²
   - Effective rank = exp(H(W))
+
+Per-call metrics (activations, via forward hooks):
+  - Mean, variance, kurtosis (excess)
+  - Dead neuron fraction  (|x| < 1e-3)
+  - Representation isotropy (1 − mean pairwise cosine similarity)
 
 Checkpoint-level metrics (full SVD, call log_checkpoint()):
   - Complete singular value spectrum (stored to JSON)
   - Stable rank, nuc/frob, entropy, effective rank, threshold rank
 
-Activation statistics (via forward hooks, every activation_freq steps):
-  - Mean, variance, kurtosis (excess)
-  - Dead neuron fraction  (|x| < 1e-3)
-  - Representation isotropy (1 − mean pairwise cosine similarity)
-
-Sharpness measurement (every sharpness_freq steps, or 0 to disable):
+Sharpness measurement (only when step % sharpness_freq == 0, 0 = disabled):
   - Mean loss increase over n_samples random ε-perturbations of weights
 
 Stability monitoring (for RQ2):
@@ -30,6 +31,7 @@ Stability monitoring (for RQ2):
   - Gradient norm spike detection (>100× rolling median)
 """
 
+import csv
 import math
 import json
 import os
@@ -38,6 +40,65 @@ from typing import Dict, Optional, List
 
 import torch
 import torch.nn as nn
+
+
+# ---------------------------------------------------------------------------
+# CSV Logger — raw data for offline analysis
+# ---------------------------------------------------------------------------
+
+class CSVLogger:
+    """
+    Writes per-category metrics to CSV files under a given directory.
+
+    One file per category; rows are appended incrementally during training so
+    the files are readable even if a run is interrupted.  Each file is opened
+    in append mode, so resuming a run continues from where it left off.
+
+    Files created:
+        logs/weight.csv      — per-parameter weight-geometry metrics
+        logs/grad.csv        — per-parameter gradient norms + direction
+        logs/activations.csv — per-block activation statistics
+        logs/sharpness.csv   — loss-landscape sharpness samples
+
+    Load with pandas after the run:
+        import pandas as pd
+        df = pd.read_csv('out/logs/weight.csv')
+    """
+
+    SCHEMA: Dict[str, List[str]] = {
+        'weight':      ['step', 'param', 'stable_rank', 'nuc_frob_ratio',
+                        'spectral_entropy', 'effective_rank'],
+        'grad':        ['step', 'param', 'fro_norm', 'spec_norm', 'direction_cosine'],
+        'activations': ['step', 'layer', 'mean', 'var', 'std', 'kurtosis',
+                        'dead_fraction', 'isotropy'],
+        'sharpness':   ['step', 'value'],
+    }
+
+    def __init__(self, log_dir: str):
+        os.makedirs(log_dir, exist_ok=True)
+        self._files = {}
+        self._writers: Dict[str, csv.DictWriter] = {}
+        for name, cols in self.SCHEMA.items():
+            path = os.path.join(log_dir, f'{name}.csv')
+            new_file = not os.path.exists(path)
+            f = open(path, 'a', newline='', buffering=1)   # line-buffered
+            writer = csv.DictWriter(f, fieldnames=cols, extrasaction='ignore')
+            if new_file:
+                writer.writeheader()
+            self._files[name] = f
+            self._writers[name] = writer
+
+    def write(self, category: str, row: dict) -> None:
+        if category in self._writers:
+            self._writers[category].writerow(row)
+
+    def flush(self) -> None:
+        for f in self._files.values():
+            f.flush()
+
+    def close(self) -> None:
+        for f in self._files.values():
+            f.close()
 
 
 # ---------------------------------------------------------------------------
@@ -327,20 +388,22 @@ class SpectralLogger:
     Composable logging callback for spectral and dynamics metrics.
 
     Registers forward hooks on transformer blocks (block_0 ... block_N)
-    to capture activation tensors. Call log_step() after backward() but
-    before optimizer.step() so gradients are still available. Call
-    log_checkpoint() at major checkpoints for full SVD dumps.
+    to capture activation tensors. Call log_step() at whatever cadence
+    you want (typically every log_interval steps from the training loop) —
+    it logs *all* metrics every time it is called.  Call log_checkpoint()
+    at major checkpoints for full SVD dumps.
+
+    The only separate frequency is sharpness_freq because sharpness requires
+    N full forward passes and is fundamentally more expensive. Set to 0 to
+    disable entirely (default).
 
     Args:
-        model:            Raw (non-DDP-wrapped) model.
-        tb_writer:        TensorBoard SummaryWriter, or None to skip TB.
-        out_dir:          Directory for JSON checkpoint logs.
-        spectral_freq:    Steps between stable-rank logs (cheap).
-        grad_freq:        Steps between gradient norm + direction logs.
-        topk_svd_freq:    Steps between top-k SVD metrics (entropy, nuc/frob).
-        activation_freq:  Steps between activation statistics logs.
-        sharpness_freq:   Steps between sharpness measurements (0 = disabled).
-        topk:             k for top-k SVD entropy computation.
+        model:             Raw (non-DDP-wrapped) model.
+        tb_writer:         TensorBoard SummaryWriter, or None to skip TB.
+        out_dir:           Directory for JSON checkpoint logs.
+        csv_dir:           Directory for CSV raw-data logs, or None to skip.
+        sharpness_freq:    Steps between sharpness measurements (0 = disabled).
+        topk:              k for top-k SVD entropy computation.
         stability_monitor: Optional StabilityMonitor for RQ2 checks.
     """
 
@@ -349,24 +412,20 @@ class SpectralLogger:
         model: nn.Module,
         tb_writer,
         out_dir: str = 'out',
-        spectral_freq: int = 100,
-        grad_freq: int = 50,
-        topk_svd_freq: int = 500,
-        activation_freq: int = 100,
-        sharpness_freq: int = 5000,
+        csv_dir: Optional[str] = None,
+        sharpness_freq: int = 0,
         topk: int = 32,
         stability_monitor: Optional[StabilityMonitor] = None,
     ):
         self.model = model
         self.writer = tb_writer
         self.out_dir = out_dir
-        self.spectral_freq = spectral_freq
-        self.grad_freq = grad_freq
-        self.topk_svd_freq = topk_svd_freq
-        self.activation_freq = activation_freq
         self.sharpness_freq = sharpness_freq
         self.topk = topk
         self.stability = stability_monitor
+
+        # CSV logger — None if csv_dir not given
+        self.csv = CSVLogger(csv_dir) if csv_dir is not None else None
 
         # Previous gradients for direction cosine similarity
         self._prev_grads: Dict[str, torch.Tensor] = {}
@@ -412,22 +471,18 @@ class SpectralLogger:
         ctx=None,
     ):
         """
-        Log all per-step metrics. Call after backward(), before optimizer.step().
-        X, Y, ctx are required only for sharpness measurements.
+        Log all metrics for this step. Call from the training loop at whatever
+        cadence you want (e.g. every log_interval steps). All metrics fire
+        every call — no internal frequency gating.
+
+        X, Y, ctx are only needed if sharpness_freq > 0.
         """
         w = self.writer
         model = self.model
 
-        do_grad = (step % self.grad_freq == 0)
-        do_spectral = (step % self.spectral_freq == 0)
-        do_topk = (step % self.topk_svd_freq == 0)
-        do_act = (step % self.activation_freq == 0)
         do_sharp = (self.sharpness_freq > 0
                     and step % self.sharpness_freq == 0
                     and X is not None and ctx is not None)
-
-        if not (do_grad or do_spectral or do_topk or do_act or do_sharp):
-            return
 
         for name, p in model.named_parameters():
             if p.dim() != 2:
@@ -437,48 +492,57 @@ class SpectralLogger:
             g = p.grad.detach() if p.grad is not None else None
 
             # --- Gradient metrics ---
-            if do_grad and g is not None:
+            if g is not None:
                 gn = grad_norms(g)
                 if w:
                     w.add_scalar(f'grad/fro_norm/{name}', gn['fro'], step)
                     w.add_scalar(f'grad/spec_norm/{name}', gn['spec'], step)
-                # Update stability monitor
                 if self.stability is not None:
                     self.stability.update_grad_norm(name, gn['fro'])
-                # Direction cosine similarity vs previous step
+                sim = None
                 if name in self._prev_grads:
                     sim = cosine_sim(g, self._prev_grads[name].to(g.device))
                     if w:
                         w.add_scalar(f'grad/direction_cosine/{name}', sim, step)
                 self._prev_grads[name] = g.float().cpu()
+                if self.csv:
+                    self.csv.write('grad', {
+                        'step': step, 'param': name,
+                        'fro_norm': gn['fro'], 'spec_norm': gn['spec'],
+                        'direction_cosine': sim if sim is not None else '',
+                    })
 
-            # --- Stable rank (cheap) ---
-            if do_spectral:
-                sr = stable_rank(W)
-                if w:
-                    w.add_scalar(f'spectral/stable_rank/{name}', sr, step)
-
-            # --- Top-k SVD metrics (nuclear/frob + entropy) ---
-            if do_topk:
-                metrics = topk_svd_metrics(W, k=self.topk)
-                if w:
-                    for k_name, v in metrics.items():
-                        w.add_scalar(f'spectral/{k_name}/{name}', v, step)
+            # --- Weight geometry: stable rank + top-k SVD ---
+            sr = stable_rank(W)
+            svd_m = topk_svd_metrics(W, k=self.topk)
+            if w:
+                w.add_scalar(f'weight/stable_rank/{name}', sr, step)
+                for k_name, v in svd_m.items():
+                    w.add_scalar(f'weight/{k_name}/{name}', v, step)
+            if self.csv:
+                self.csv.write('weight', {
+                    'step': step, 'param': name,
+                    'stable_rank': sr,
+                    **svd_m,
+                })
 
         # --- Activation statistics ---
-        if do_act and self._act_cache:
-            for name, act in self._act_cache.items():
-                stats = activation_stats(act)
-                if w:
-                    for stat_key, v in stats.items():
-                        w.add_scalar(f'activations/{stat_key}/{name}', v, step)
-            self._act_cache.clear()
+        for name, act in self._act_cache.items():
+            stats = activation_stats(act)
+            if w:
+                for stat_key, v in stats.items():
+                    w.add_scalar(f'activations/{stat_key}/{name}', v, step)
+            if self.csv:
+                self.csv.write('activations', {'step': step, 'layer': name, **stats})
+        self._act_cache.clear()
 
-        # --- Sharpness ---
+        # --- Sharpness (gated separately — expensive) ---
         if do_sharp:
             sh = measure_sharpness(model, X, Y, ctx)
             if w:
-                w.add_scalar('dynamics/sharpness', sh, step)
+                w.add_scalar('sharpness/value', sh, step)
+            if self.csv:
+                self.csv.write('sharpness', {'step': step, 'value': sh})
 
     # ------------------------------------------------------------------
     # Checkpoint-level full SVD
@@ -498,7 +562,8 @@ class SpectralLogger:
             if self.writer:
                 for k, v in stats.items():
                     if isinstance(v, (int, float)):
-                        self.writer.add_scalar(f'checkpoint/{k}/{name}', v, step)
+                        # TB: checkpoint/weight/{metric}/{param}
+                        self.writer.add_scalar(f'checkpoint/weight/{k}/{name}', v, step)
 
         path = os.path.join(self.out_dir, f'svd_step_{step:07d}.json')
         try:
@@ -509,6 +574,11 @@ class SpectralLogger:
             print(f"Warning: could not save SVD checkpoint: {e}")
 
         return results
+
+    def close(self) -> None:
+        """Flush and close CSV files. Call at the end of training."""
+        if self.csv is not None:
+            self.csv.close()
 
     # ------------------------------------------------------------------
     # RQ2 stability check

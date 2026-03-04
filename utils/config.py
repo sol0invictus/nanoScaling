@@ -2,6 +2,8 @@ import yaml
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
+from utils.research_config import ResearchConfig
+
 @dataclass
 class ParametrizationConfig:
     mode: str = 'SP' # 'SP', 'MuP', 'CompleteP'
@@ -19,31 +21,34 @@ class ExperimentConfig:
     eval_only: bool = False
     always_save_checkpoint: bool = True
     init_from: str = 'scratch'
-    
+
     # Logging
     tensorboard_log: bool = True
     tensorboard_run_name: str = 'gpt2_muon'
-    
+
     # Data
     dataset: str = 'openwebtext'
     val_splits: List[str] = field(default_factory=lambda: ['val'])
     gradient_accumulation_steps: int = 5 * 8
     batch_size: int = 12
     block_size: int = 1024
-    
+    data_format: str = 'auto'           # 'auto' (detect), 'bin' (memmap), 'parquet' (on-the-fly)
+    dataloader_buffer_size: int = 1000  # parquet mode: number of docs in tokenization buffer
+    tokenizer_batch_size: int = 128     # parquet mode: reserved for future threaded tokenization
+
     # Model
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = False # default to False for modern architecture
-    
+
     # Architecture Toggles
     use_rmsnorm: bool = True
     use_rope: bool = True
     use_swiglu: bool = True
     multiple_of: int = 256 # for SwiGLU
-    
+
     # MoE
     use_moe: bool = False
     num_experts: int = 8
@@ -55,8 +60,6 @@ class ExperimentConfig:
     moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
     moe_block_size: int = 128    # Triton tile size for block-sparse kernels
 
-
-    
     # Normalization (for RQ2 ablations)
     norm_position: str = 'pre'   # 'pre' (Pre-LN), 'post' (Post-LN), 'none' (no normalization)
     norm_affine: bool = True     # whether norm layers have learnable gamma/beta
@@ -82,32 +85,35 @@ class ExperimentConfig:
     beta1: float = 0.9
     beta2: float = 0.95
     grad_clip: float = 1.0
-    
+
     # LR Scheduler
     decay_lr: bool = True
     warmup_iters: int = 2000
     lr_decay_iters: int = 600000
     min_lr: float = 6e-5
-    
+
     # System
     device: str = 'cuda'
     dtype: str = 'bfloat16'
     compile: bool = True
     backend: str = 'nccl'
-    
+
     # Parametrization
     parametrization: ParametrizationConfig = field(default_factory=ParametrizationConfig)
+
+    # Research / Experiment Logging (see utils/research_config.py)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
 
     @classmethod
     def from_yaml(cls, path: str):
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
-        
+
         # Enforce types based on default values (dataclasses don't auto-convert)
         # This fixes issues where scientific notation like "6e-4" is loaded as str by PyYAML
         default_obj = cls()
         for k, v in data.items():
-            if k == 'parametrization': continue
+            if k in ('parametrization', 'research'): continue
             if hasattr(default_obj, k):
                 # Get the type of the default value
                 expected_type = type(getattr(default_obj, k))
@@ -122,14 +128,18 @@ class ExperimentConfig:
                     except Exception:
                         pass
 
-        # Handle nested config
+        # Handle nested configs
         if 'parametrization' in data:
             data['parametrization'] = ParametrizationConfig(**data['parametrization'])
+        if 'research' in data:
+            data['research'] = ResearchConfig(**data['research'])
         return cls(**data)
-    
+
     def to_dict(self):
         # simple recursion for dataclasses
         d = vars(self).copy()
         if isinstance(d['parametrization'], ParametrizationConfig):
             d['parametrization'] = vars(d['parametrization'])
+        if isinstance(d['research'], ResearchConfig):
+            d['research'] = vars(d['research'])
         return d
