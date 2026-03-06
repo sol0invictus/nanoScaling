@@ -280,7 +280,16 @@ class Block(nn.Module):
         super().__init__()
         self._norm_position = getattr(config, 'norm_position', 'pre')
         self.ln_1 = build_norm(config)
-        self.attn = CausalSelfAttention(config)
+
+        # Hybrid: use GatedDeltaNetLayer for designated layers
+        use_hybrid = getattr(config, 'use_hybrid', False)
+        delta_net_every = getattr(config, 'delta_net_every', 2)
+        if use_hybrid and layer_idx is not None and layer_idx % delta_net_every == 0:
+            from models.gated_delta_net import GatedDeltaNetLayer
+            self.attn = GatedDeltaNetLayer(config)
+        else:
+            self.attn = CausalSelfAttention(config)
+
         self.ln_2 = build_norm(config)
         
         # MoE logic
@@ -350,6 +359,11 @@ class GPTConfig:
     router_z_loss_weight: float = 0.001
     moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
     moe_block_size: int = 128    # Triton tile size for block-sparse kernels
+    # Hybrid (Gated Delta Net interleaved with standard attention)
+    # Requires: pip install flash-linear-attention
+    use_hybrid: bool = False
+    delta_net_every: int = 2     # layers 0, delta_net_every, 2*delta_net_every, ... use GDN
+    delta_net_chunk_size: int = 64  # chunk size for FLA chunked parallel scan
     # Optimizer params (used by configure_optimizers)
     optimizer: str = 'adamw'
     muon_lr: float = 0.02
