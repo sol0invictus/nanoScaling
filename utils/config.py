@@ -60,6 +60,12 @@ class ExperimentConfig:
     moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
     moe_block_size: int = 128    # Triton tile size for block-sparse kernels
 
+    # Hybrid (Gated Delta Net interleaved with standard attention)
+    # Requires: pip install flash-linear-attention
+    use_hybrid: bool = False
+    delta_net_every: int = 2      # layers 0, delta_net_every, 2*delta_net_every, ... use GDN
+    delta_net_chunk_size: int = 64  # chunk size for FLA chunked parallel scan
+
     # Normalization (for RQ2 ablations)
     norm_position: str = 'pre'   # 'pre' (Pre-LN), 'post' (Post-LN), 'none' (no normalization)
     norm_affine: bool = True     # whether norm layers have learnable gamma/beta

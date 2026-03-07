@@ -1,0 +1,80 @@
+# Hybrid Gated-Delta-Net + Attention model
+#
+# Alternates GatedDeltaNet (linear attention with gated delta rule) and
+# standard causal self-attention layers, giving O(T) memory for GDN layers
+# while retaining full quadratic attention at designated layers.
+#
+# Requirements:
+#   pip install flash-linear-attention
+#
+# Architecture (n_layer=8, delta_net_every=2):
+#   Layer 0 → GatedDeltaNet   (linear, O(T))
+#   Layer 1 → CausalAttention (quadratic, O(T²))
+#   Layer 2 → GatedDeltaNet
+#   Layer 3 → CausalAttention
+#   ...
+#
+# Paper: "Gated Delta Networks: Improving Mamba2 with Delta Rule"
+#         https://arxiv.org/abs/2412.06464
+
+# I/O
+out_dir: "out-hybrid-gdn"
+eval_interval: 500
+log_interval: 1
+eval_iters: 100
+eval_only: false
+always_save_checkpoint: true
+init_from: "scratch"
+
+# Logging
+tensorboard_log: true
+tensorboard_run_name: "hybrid_gdn_run"
+
+# Data
+dataset: "openwebtext"
+gradient_accumulation_steps: 8
+batch_size: 16
+block_size: 1024
+
+# Model Architecture
+n_layer: 8
+n_head: 8
+n_embd: 512
+dropout: 0.0
+bias: false
+
+# Architecture Toggles
+use_rmsnorm: true
+use_rope: true        # applied only to CausalAttention layers; GDN uses sub-norms instead
+use_swiglu: true
+multiple_of: 256
+
+# Hybrid: interleave GatedDeltaNet and standard attention layers
+# Requires:  pip install flash-linear-attention
+use_hybrid: true
+delta_net_every: 2      # layers 0, 2, 4, ... → GatedDeltaNet; odd layers → CausalAttention
+delta_net_chunk_size: 64  # chunk size for FLA chunked parallel scan (power of 2, ≥ 16)
+
+# Optimizer
+optimizer: "adamw"
+learning_rate: 3e-4
+max_iters: 10000
+weight_decay: 1e-1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+# LR Scheduler
+decay_lr: true
+warmup_iters: 500
+lr_decay_iters: 10000
+min_lr: 3e-5
+
+# System
+device: "cuda"
+dtype: "bfloat16"
+compile: false   # set true after verifying correctness; FLA kernels are Triton-based
+
+# Parametrization
+parametrization:
+  mode: "SP"
