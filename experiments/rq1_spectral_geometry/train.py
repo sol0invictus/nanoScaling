@@ -48,7 +48,7 @@ sys.path.insert(0, project_root)
 from models import GPTConfig, GPT
 from utils.config import ExperimentConfig
 from utils.parametrization import apply_parametrization
-from utils.data import get_batch as get_batch_fn
+from utils.data import get_batch as get_batch_fn, create_dataloader
 from utils.spectral_metrics import SpectralLogger, StabilityMonitor
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,41 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(
 
 data_dir = os.path.join(project_root, 'data', config.dataset)
 
+import warnings as _warnings
+
+_train_loader = create_dataloader('train', config, device_type, device, data_dir,
+                                  ddp_rank=ddp_rank if ddp else 0,
+                                  ddp_world_size=ddp_world_size)
+_val_loaders = {}
+for _split in sorted(set(config.val_splits)):
+    try:
+        _val_loaders[_split] = create_dataloader(_split, config, device_type, device,
+                                                  data_dir,
+                                                  ddp_rank=ddp_rank if ddp else 0,
+                                                  ddp_world_size=ddp_world_size)
+    except (ValueError, FileNotFoundError) as _e:
+        _warnings.warn(f"Skipping data split '{_split}': {_e}")
+
+_extra_val_loaders = {}  # key: basename of folder path
+for _ds_path in config.val_datasets:
+    _ds_abs = _ds_path if os.path.isabs(_ds_path) else os.path.join(project_root, _ds_path)
+    _ds_key = os.path.basename(_ds_path.rstrip('/\\'))
+    try:
+        _extra_val_loaders[_ds_key] = create_dataloader(
+            'val', config, device_type, device, _ds_abs,
+            ddp_rank=ddp_rank if ddp else 0,
+            ddp_world_size=ddp_world_size,
+        )
+        print(f"Loaded extra val dataset: {_ds_key} ({_ds_abs})")
+    except (ValueError, FileNotFoundError) as _e:
+        _warnings.warn(f"Skipping extra val dataset '{_ds_path}': {_e}")
+
 def get_batch(split):
+    if split == 'train':
+        return next(_train_loader)
+    loader = _val_loaders.get(split)
+    if loader is not None:
+        return next(loader)
     return get_batch_fn(split, config, device_type, device, data_dir)
 
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -212,10 +246,6 @@ if master_process and config.tensorboard_log:
         model=raw_model,
         tb_writer=tb_writer,
         out_dir=config.out_dir,
-        spectral_freq=spectral_freq,
-        grad_freq=grad_freq,
-        topk_svd_freq=topk_svd_freq,
-        activation_freq=activation_freq,
         sharpness_freq=sharpness_freq,
         topk=topk,
     )
@@ -253,8 +283,7 @@ def apply_lr(it: int):
 def estimate_loss():
     out = {}
     model.eval()
-    splits = sorted(set(['train'] + config.val_splits))
-    for split in splits:
+    for split in sorted(set(['train'] + config.val_splits)):
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
             try:
@@ -266,6 +295,14 @@ def estimate_loss():
             losses[k] = loss.item()
         key = split[:-4] if split.endswith('.bin') else split
         out[key] = losses.mean()
+    for ds_name, loader in _extra_val_loaders.items():
+        losses = torch.zeros(config.eval_iters)
+        for k in range(config.eval_iters):
+            X, Y = next(loader)
+            with ctx:
+                _, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[ds_name] = losses.mean()
     model.train()
     return out
 

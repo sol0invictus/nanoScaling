@@ -17,6 +17,7 @@ class ExperimentConfig:
     log_interval: int = 1
     eval_iters: int = 200
     eval_only: bool = False
+    checkpoint_interval: int = 0   # save checkpoint every N steps (0 = tie to eval_interval)
     always_save_checkpoint: bool = True
     init_from: str = 'scratch'
 
@@ -27,6 +28,10 @@ class ExperimentConfig:
     # Data
     dataset: str = 'openwebtext'
     val_splits: List[str] = field(default_factory=lambda: ['val'])
+    # Validation dataset folders evaluated at each eval_interval alongside val_splits.
+    # Each entry is a path to a dataset folder (e.g. 'data/wikitext103', 'data/pile_val').
+    # Both parquet and bin formats are auto-detected per folder.
+    val_datasets: List[str] = field(default_factory=list)
     gradient_accumulation_steps: int = 5 * 8
     batch_size: int = 12
     block_size: int = 1024

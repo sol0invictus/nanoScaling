@@ -110,12 +110,15 @@ def _tokenize_texts(texts: list, enc) -> list:
 # Best-fit packing
 # ---------------------------------------------------------------------------
 
-def _pack_tokens(doc_buffer: list, B: int, T: int) -> list:
+def _pack_tokens(doc_buffer: list, B: int, T: int, refill_fn=None) -> list:
     """Pack B rows of exactly T+1 tokens from doc_buffer using best-fit algorithm.
 
     Mutates doc_buffer in place (consumes docs; re-inserts remainders).
     Returns a list of B token-id lists, each of length T+1.
     The caller slices [:T] for inputs and [1:T+1] for targets.
+
+    refill_fn: optional callable that appends more tokenized docs to doc_buffer.
+               Called when the buffer is exhausted mid-batch (e.g. tiny datasets).
     """
     row_capacity = T + 1
     rows = []
@@ -126,6 +129,10 @@ def _pack_tokens(doc_buffer: list, B: int, T: int) -> list:
 
         while pos < row_capacity:
             remaining = row_capacity - pos
+
+            # Refill if buffer is empty (can happen with very small datasets)
+            while not doc_buffer and refill_fn:
+                refill_fn()
 
             # Find the largest document that fits entirely in remaining space
             best_idx = -1
@@ -218,7 +225,7 @@ def create_parquet_dataloader(
         while len(doc_buffer) < buffer_size // 2:
             _fill_buffer()
 
-        rows = _pack_tokens(doc_buffer, B, T)
+        rows = _pack_tokens(doc_buffer, B, T, refill_fn=_fill_buffer)
 
         # rows: list of B lists, each of length T+1
         arr = np.array(rows, dtype=np.int64)  # [B, T+1]

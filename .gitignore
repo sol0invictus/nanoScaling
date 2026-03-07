@@ -15,3 +15,4 @@ out/
 wandb/
 research_plan/
 CLAUDE.md
+*.parquet

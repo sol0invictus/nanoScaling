@@ -6,8 +6,10 @@
 out_dir: "out"
 eval_interval: 2000
 log_interval: 1
-eval_iters: 200
+eval_iters: 2
+eval_interval: 5
 eval_only: false
+checkpoint_interval: 0    # 0 = save at eval_interval; set > 0 to decouple (e.g. 5000)
 always_save_checkpoint: true
 init_from: "scratch" # 'scratch', 'resume', 'gpt2*'
 
@@ -16,7 +18,14 @@ tensorboard_log: true
 tensorboard_run_name: "gpt2_full_config_run"
 
 # Data
-dataset: "openwebtext" # 'shakespeare', 'openwebtext'
+dataset: "shakespeare" # 'shakespeare', 'openwebtext'
+
+# Validation dataset folders evaluated at each eval_interval.
+# Each entry is a path to a dataset folder (parquet or bin, auto-detected).
+# The folder basename is used as the key in TensorBoard (val/loss_<name>).
+val_datasets:
+  - data/wikitext103
+
 gradient_accumulation_steps: 40 # 5 * 8 (example)
 batch_size: 12
 block_size: 1024

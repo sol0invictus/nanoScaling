@@ -148,6 +148,20 @@ for _split in sorted(set(['train'] + config.val_splits)):
     except (ValueError, FileNotFoundError) as _e:
         _warnings.warn(f"Skipping data split '{_split}': {_e}")
 
+# Validation datasets — each entry is a path to a dataset folder
+_extra_val_loaders = {}  # key: basename of folder path
+for _ds_path in config.val_datasets:
+    _ds_key = os.path.basename(_ds_path.rstrip('/\\'))
+    try:
+        _extra_val_loaders[_ds_key] = create_dataloader(
+            'val', config, device_type, device, _ds_path,
+            ddp_rank=ddp_rank if ddp else 0,
+            ddp_world_size=ddp_world_size,
+        )
+        print(f"Loaded extra val dataset: {_ds_key} ({_ds_path})")
+    except (ValueError, FileNotFoundError) as _e:
+        _warnings.warn(f"Skipping extra val dataset '{_ds_path}': {_e}")
+
 def get_batch(split):
     if split == 'train':
         return next(_train_loader)
@@ -205,6 +219,25 @@ elif config.init_from == 'resume':
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 
+elif os.path.isfile(config.init_from):
+    print(f"Loading checkpoint from {config.init_from}")
+    checkpoint = torch.load(config.init_from, map_location=device)
+
+    checkpoint_config = checkpoint.get('config', {})
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'use_rmsnorm', 'use_rope', 'use_swiglu']:
+        if k in checkpoint_config and hasattr(config, k):
+            setattr(config, k, checkpoint_config[k])
+
+    model = GPT(config)
+    state_dict = checkpoint['model']
+    unwanted_prefix = '_orig_mod.'
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict)
+    iter_num = checkpoint.get('iter_num', 0)
+    best_val_loss = checkpoint.get('best_val_loss', 1e9)
+
 elif config.init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {config.init_from}")
     override_args = dict(dropout=config.dropout)
@@ -258,29 +291,33 @@ if ddp:
 
 @torch.no_grad()
 def estimate_loss():
-    """ Helps estimate an arbitrarily accurate loss over either split using many batches """
+    """ Estimate loss over training split, configured val splits, and extra val datasets. """
     out = {}
     model.eval()
 
-    splits = ['train'] + config.val_splits
-    splits = sorted(list(set(splits)))
-
-    for split in splits:
+    # Main dataset splits (train + val_splits within the training dataset)
+    for split in sorted(set(['train'] + config.val_splits)):
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
             try:
                 X, Y = get_batch(split)
             except FileNotFoundError:
                 continue
-
             with ctx:
-                logits, loss = model(X, Y)
+                _, loss = model(X, Y)
             losses[k] = loss.item()
-
-        key = split
-        if split.endswith('.bin'):
-            key = split[:-4]
+        key = split[:-4] if split.endswith('.bin') else split
         out[key] = losses.mean()
+
+    # Extra validation datasets (separate data directories)
+    for ds_name, loader in _extra_val_loaders.items():
+        losses = torch.zeros(config.eval_iters)
+        for k in range(config.eval_iters):
+            X, Y = next(loader)
+            with ctx:
+                _, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[ds_name] = losses.mean()
 
     model.train()
     return out
@@ -336,7 +373,7 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # 2. Evaluation and Checkpointing
+    # 2. Evaluation
     if iter_num % config.eval_interval == 0 and master_process:
         losses = estimate_loss()
 
@@ -350,21 +387,23 @@ while True:
              for k, v in losses.items():
                  tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
 
-        # Track best 'val' loss (assumes 'val' exists, or use first available)
+        # Track best 'val' loss for checkpoint_interval=0 (eval-coupled) mode
         current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
-
-        if current_val_loss < best_val_loss or config.always_save_checkpoint:
+        if current_val_loss < best_val_loss:
             best_val_loss = current_val_loss
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'config': config.to_dict(),
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                }
-                print(f"saving checkpoint to {config.out_dir}")
-                torch.save(checkpoint, os.path.join(config.out_dir, 'ckpt.pt'))
+
+    # 3. Checkpointing (decoupled from eval)
+    _ckpt_interval = config.checkpoint_interval if config.checkpoint_interval > 0 else config.eval_interval
+    if iter_num % _ckpt_interval == 0 and master_process and iter_num > 0:
+        checkpoint = {
+            'model': raw_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'config': config.to_dict(),
+            'iter_num': iter_num,
+            'best_val_loss': best_val_loss,
+        }
+        print(f"saving checkpoint to {config.out_dir}")
+        torch.save(checkpoint, os.path.join(config.out_dir, 'ckpt.pt'))
 
     if iter_num == 0 and config.eval_only:
         break
