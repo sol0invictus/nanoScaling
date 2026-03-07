@@ -2,13 +2,13 @@
 
 ## Tasks
 
-- [ ] Create validation dataset files
-  - [ ] Run `python data/wikitext103/prepare.py`
-  - [ ] Run `python data/penn_treebank/prepare.py`
-  - [ ] Run `python data/pile_val/prepare.py`
+- [x] Create validation dataset files
+  - [x] Run `python data/wikitext103/prepare.py`
+  - [x] Run `python data/penn_treebank/prepare.py`
+  - [x] Run `python data/pile_val/prepare.py`
 
 - [ ] Test if validation is working
-  - [ ] Run eval-only pass on a checkpoint with `configs/eval/wikitext103.yaml`
+  - [x] Run eval-only pass on a checkpoint with `configs/eval/wikitext103.yaml`
   - [ ] Confirm `metrics.json` reports correct val loss per dataset
 
 - [ ] Create parquets for local datasets to test

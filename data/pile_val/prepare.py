@@ -5,8 +5,10 @@ The Pile (EleutherAI, 2021) is the most comprehensive open LM benchmark.
 Reporting perplexity on The Pile val set is increasingly expected for
 publishable pretraining results.
 
-The val set contains 214 documents (~1.8M tokens when GPT-2 tokenized),
-sampled from all 22 Pile components.
+Uses `monology/pile-uncopyrighted` (HuggingFace-hosted, train split only).
+Takes the first 10,000 documents as a fixed held-out val set. The original
+`EleutherAI/pile` is unavailable (the-eye.eu is offline) and
+`monology/pile-uncopyrighted` has no validation split.
 
 Raw text is stored as parquet — tokenization happens on-the-fly in the
 dataloader, matching the FineWeb-Edu parquet pipeline exactly.
@@ -62,20 +64,27 @@ def write_shard(texts: list, output_path: str) -> None:
     os.rename(tmp_path, output_path)
 
 
+VAL_DOCS = 10_000  # number of train docs to use as a fixed val set
+
+
 def prepare(per_domain: bool = False):
-    print("Downloading The Pile validation set from HuggingFace...")
+    # monology/pile-uncopyrighted only has a train split; take the first VAL_DOCS
+    # documents as a held-out val set. Streaming avoids downloading the full corpus.
+    print(f"Streaming first {VAL_DOCS:,} docs from monology/pile-uncopyrighted (train)...")
     dataset = load_dataset(
-        "EleutherAI/pile",
-        split="validation",
+        "monology/pile-uncopyrighted",
+        split="train",
         trust_remote_code=True,
-        streaming=False,
+        streaming=True,
     )
 
     all_texts = []
     domain_texts: dict = {}
 
-    print(f"Collecting {len(dataset):,} documents...")
+    print("Collecting documents (streaming)...")
     for doc in dataset:
+        if len(all_texts) >= VAL_DOCS:
+            break
         text = doc["text"]
         if not text.strip():
             continue
