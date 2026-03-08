@@ -79,8 +79,10 @@ python experiments/structured_weight_decay/train.py \
 ### Data Preparation
 
 ```bash
-# OpenWebText (~9B tokens, ~17 GB) — produces pre-tokenized .bin files
-python data/openwebtext/prepare.py
+# OpenWebText (~8M docs) — produces parquet shards (raw text, tokenized on-the-fly)
+python data/openwebtext/prepare.py                          # full dataset (~320 train shards + 1 val)
+python data/openwebtext/prepare.py --max_shards 10          # quick experiment subset
+python data/openwebtext/prepare.py --num_workers 16         # more parallel shard writers
 
 # FineWeb-Edu — two options:
 
@@ -212,7 +214,8 @@ All metrics fire together every time `log_step()` is called — there are no sep
 
 **DDP data loading**:
 - *Bin path*: all ranks `mmap` the same `.bin` file, draw random positions using per-rank RNG seeds. Diversity is probabilistic.
-- *Parquet path*: all ranks read the same parquet files but take different row groups (rank `r` reads RG indices `r, r+W, r+2W, ...`). No pre-splitting required.
+- *Parquet path*: rank `r` reads row groups at indices `r, r+W, r+2W, ...`. When `world_size > total_row_groups` (common for small val shards), `effective_world = min(world_size, total_rg)` is used and ranks wrap via `ddp_rank % effective_world` to avoid deadlock. `create_parquet_dataloader()` returns a `_LoaderWrapper` that exposes `loader.effective_world` so `estimate_loss` can apply correct per-rank weights in `all_reduce(SUM)` even when `world_size % total_rg != 0`.
+- *DDP eval*: all ranks call `estimate_loss()` together. Per-loader weighted `all_reduce(SUM) / effective_world` gives an unbiased mean regardless of how row groups divide across ranks. Only `master_process` logs/checkpoints.
 
 ### Training Scripts
 
@@ -232,7 +235,7 @@ Two data paths, selected automatically via `data_format` config:
 - DDP: rank `r` reads row groups at indices `r, r+W, r+2W, ...` from shared parquet files (no pre-splitting)
 - Val split convention: last shard = val, all others = train
 
-**Bin path** (`utils/data.py`) — used for OpenWebText, Shakespeare, and any dataset with pre-tokenized `.bin` files:
+**Bin path** (`utils/data.py`) — used for Shakespeare and any dataset with pre-tokenized `.bin` files:
 - `get_batch()` — memory-mapped uint16 arrays, random position sampling per batch
 - DDP: all ranks read from the same `.bin` file with per-rank RNG seeds
 
@@ -244,6 +247,9 @@ Two data paths, selected automatically via `data_format` config:
 - `data/code_val/prepare.py` — First 5k Python files from `codeparrot/codeparrot-clean-valid`; standard code perplexity benchmark
 - `data/math_val/prepare.py` — `openai/gsm8k` test split (~1.3k grade-school math problems + chain-of-thought answers); widely cited math benchmark
 - `data/shakespeare/prepare_parquet.py` — converts Shakespeare `input.txt` to parquet shards for smoke-testing the parquet dataloader
+
+**OpenWebText data utilities**:
+- `data/openwebtext/prepare.py` — downloads `Skylion007/openwebtext` from HuggingFace, splits train/val (0.05%, seed 2357), and writes raw text as parquet shards. Parallel shard writing via `--num_workers` (default: `os.cpu_count()`). Last shard = val. Supports `--max_shards`, `--docs_per_shard`, `--output_dir`.
 
 **FineWeb-Edu data utilities**:
 - `data/fineweb_edu/download.py` — downloads pre-built parquet shards from `karpathy/fineweb-edu-100b-shuffle` (1823 shards, ~180 GB total)
@@ -271,7 +277,7 @@ Applies initialization scaling and per-parameter LR multipliers based on `Parame
 - **LR scheduling with CombinedOptimizer**: The experiment scripts scale each optimizer's LR by a cosine decay *multiplier* applied to its individual initial LR, so Muon and AdamW decay proportionally rather than converging to the same absolute value. TB tags: `train/lr/muon` and `train/lr/adamw`.
 - **SVD checkpoints**: Full singular value spectra are written as `svd_step_NNNNNNN.json` in `out_dir` at each major checkpoint for offline analysis.
 - **FineWeb-Edu dataset**: Two preparation paths: `download.py` fetches pre-built parquet shards from `karpathy/fineweb-edu-100b-shuffle`; `prepare.py` streams `HuggingFaceFW/fineweb-edu` and saves raw text as parquet. Both produce `shard_?????.parquet` files consumed by `utils/dataloader.py` with on-the-fly GPT-2 tokenization. The old pre-tokenized `.bin` workflow is removed for FineWeb-Edu.
-- **Data format auto-detection**: `create_dataloader()` in `utils/data.py` checks for `shard_?????.parquet` files and routes to the parquet path automatically. OpenWebText and Shakespeare still use the `.bin` memmap path unchanged. Force a specific path with `data_format: 'bin'` or `data_format: 'parquet'` in config.
+- **Data format auto-detection**: `create_dataloader()` in `utils/data.py` checks for `shard_?????.parquet` files and routes to the parquet path automatically. OpenWebText now uses parquet (run `data/openwebtext/prepare.py`). Shakespeare still uses the `.bin` memmap path. Force a specific path with `data_format: 'bin'` or `data_format: 'parquet'` in config.
 - **MoE auxiliary loss**: Two coefficients: `load_balance_loss_weight` (default 0.01) and `router_z_loss_weight` (default 0.001); both are added directly to the main cross-entropy loss. Note: MoE is currently disabled in `models/gpt.py` via an import guard (`MoELayer = None`) due to a temporary issue.
 - **Multi-dataset validation**: `val_splits` lists split names within the training dataset; `val_datasets` lists paths to separate dataset folders (parquet or bin). Both are evaluated every `eval_interval` and logged to TensorBoard under `val/<split>` tags.
 - **Hybrid model**: `use_hybrid=True` replaces every `delta_net_every`-th layer (starting at 0) with `GatedDeltaNetLayer` from `models/gated_delta_net.py`. Requires `flash-linear-attention`. Config: `configs/hybrid_gated_delta_net.yaml`.

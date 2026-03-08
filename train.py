@@ -295,6 +295,26 @@ def estimate_loss():
     out = {}
     model.eval()
 
+    def _reduce(mean_loss, loader):
+        """Weighted all_reduce(SUM)/effective_world — unbiased even when
+        world_size % effective_world != 0 (row groups don't divide evenly).
+
+        Each rank contributes weight = 1/n_sharing, where n_sharing is how many
+        ranks share the same effective row-group slot.  Summing across all ranks
+        gives the unweighted mean over unique row groups.
+
+        Bin loaders (no .effective_world attr) draw independent random batches
+        per rank, so plain AVG is correct — same as effective_world==world_size.
+        """
+        if not ddp:
+            return mean_loss
+        eff_world = getattr(loader, 'effective_world', ddp_world_size)
+        eff_rank  = ddp_rank % eff_world
+        n_sharing = (ddp_world_size // eff_world) + (1 if eff_rank < ddp_world_size % eff_world else 0)
+        t = torch.tensor(mean_loss / n_sharing, device=device)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+        return t.item() / eff_world
+
     # Main dataset splits (train + val_splits within the training dataset)
     for split in sorted(set(['train'] + config.val_splits)):
         losses = torch.zeros(config.eval_iters)
@@ -306,8 +326,9 @@ def estimate_loss():
             with ctx:
                 _, loss = model(X, Y)
             losses[k] = loss.item()
+        loader = _train_loader if split == 'train' else _val_loaders.get(split)
         key = split[:-4] if split.endswith('.bin') else split
-        out[key] = losses.mean()
+        out[key] = _reduce(losses.mean().item(), loader)
 
     # Extra validation datasets (separate data directories)
     for ds_name, loader in _extra_val_loaders.items():
@@ -317,7 +338,7 @@ def estimate_loss():
             with ctx:
                 _, loss = model(X, Y)
             losses[k] = loss.item()
-        out[ds_name] = losses.mean()
+        out[ds_name] = _reduce(losses.mean().item(), loader)
 
     model.train()
     return out
@@ -373,24 +394,25 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # 2. Evaluation
-    if iter_num % config.eval_interval == 0 and master_process:
+    # 2. Evaluation — all ranks participate so all_reduce in estimate_loss works.
+    if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
 
-        loss_msg = f"step {iter_num}:"
-        for k, v in losses.items():
-            loss_msg += f" {k} loss {v:.4f},"
-        print(loss_msg)
+        if master_process:
+            loss_msg = f"step {iter_num}:"
+            for k, v in losses.items():
+                loss_msg += f" {k} loss {v:.4f},"
+            print(loss_msg)
 
-        # Write to TensorBoard
-        if config.tensorboard_log:
-             for k, v in losses.items():
-                 tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
+            # Write to TensorBoard
+            if config.tensorboard_log:
+                 for k, v in losses.items():
+                     tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
 
-        # Track best 'val' loss for checkpoint_interval=0 (eval-coupled) mode
-        current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
-        if current_val_loss < best_val_loss:
-            best_val_loss = current_val_loss
+            # Track best 'val' loss for checkpoint_interval=0 (eval-coupled) mode
+            current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
+            if current_val_loss < best_val_loss:
+                best_val_loss = current_val_loss
 
     # 3. Checkpointing (decoupled from eval)
     _ckpt_interval = config.checkpoint_interval if config.checkpoint_interval > 0 else config.eval_interval
