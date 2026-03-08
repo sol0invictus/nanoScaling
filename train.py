@@ -424,8 +424,21 @@ while True:
             'iter_num': iter_num,
             'best_val_loss': best_val_loss,
         }
-        print(f"saving checkpoint to {config.out_dir}")
-        torch.save(checkpoint, os.path.join(config.out_dir, 'ckpt.pt'))
+        # Save numbered checkpoint and update ckpt.pt (latest) symlink/copy
+        numbered_ckpt = os.path.join(config.out_dir, f'ckpt_{iter_num:07d}.pt')
+        latest_ckpt   = os.path.join(config.out_dir, 'ckpt.pt')
+        print(f"saving checkpoint to {numbered_ckpt}")
+        torch.save(checkpoint, numbered_ckpt)
+        # Update ckpt.pt as a copy of the latest (keeps 'resume' working)
+        import shutil as _shutil
+        _shutil.copy2(numbered_ckpt, latest_ckpt)
+        # Rotate: delete old numbered checkpoints beyond keep_last_n_checkpoints
+        if config.keep_last_n_checkpoints > 0:
+            import glob as _glob
+            _all_ckpts = sorted(_glob.glob(os.path.join(config.out_dir, 'ckpt_???????.pt')))
+            for _old in _all_ckpts[:-config.keep_last_n_checkpoints]:
+                os.remove(_old)
+                print(f"removed old checkpoint {os.path.basename(_old)}")
 
     if iter_num == 0 and config.eval_only:
         break

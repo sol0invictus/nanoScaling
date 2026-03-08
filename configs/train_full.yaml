@@ -11,6 +11,7 @@ eval_interval: 50
 eval_only: false
 checkpoint_interval: 100    # 0 = save at eval_interval; set > 0 to decouple (e.g. 5000)
 always_save_checkpoint: true
+keep_last_n_checkpoints: 3  # keep N most recent ckpt_NNNNNNN.pt files (0 = keep all)
 init_from: "scratch" # 'scratch', 'resume', 'gpt2*'
 
 # Logging

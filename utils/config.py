@@ -19,6 +19,7 @@ class ExperimentConfig:
     eval_only: bool = False
     checkpoint_interval: int = 0   # save checkpoint every N steps (0 = tie to eval_interval)
     always_save_checkpoint: bool = True
+    keep_last_n_checkpoints: int = 3  # keep N most recent numbered checkpoints (0 = keep all)
     init_from: str = 'scratch'
 
     # Logging

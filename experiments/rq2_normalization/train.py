@@ -243,14 +243,18 @@ tb_writer = None
 spectral_logger = None
 stability_monitor = StabilityMonitor()
 
-if master_process and config.tensorboard_log:
-    from torch.utils.tensorboard import SummaryWriter
-    tb_writer = SummaryWriter(
-        log_dir=os.path.join(config.out_dir, 'runs', config.tensorboard_run_name))
+if master_process:
+    if config.tensorboard_log:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(
+            log_dir=os.path.join(config.out_dir, 'runs', config.tensorboard_run_name))
+    # Always create SpectralLogger on master: CSVs are written regardless of TensorBoard.
+    # tb_writer=None means spectral metrics go to CSV only.
     spectral_logger = SpectralLogger(
         model=raw_model,
         tb_writer=tb_writer,
         out_dir=config.out_dir,
+        csv_dir=os.path.join(config.out_dir, 'logs'),
         sharpness_freq=sharpness_freq,
         stability_monitor=stability_monitor,
     )

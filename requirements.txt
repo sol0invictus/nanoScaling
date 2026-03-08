@@ -1,0 +1,20 @@
+# Core training dependencies
+torch>=2.0.0          # compile=True requires 2.0+
+numpy
+transformers
+datasets
+tiktoken
+wandb
+tqdm
+matplotlib
+pandas
+seaborn
+PyYAML
+pyarrow
+requests
+
+# Optional: Mixture of Experts (configs/moe.yaml)
+# pip install megablocks einops
+
+# Optional: Hybrid GatedDeltaNet linear attention (configs/hybrid_gated_delta_net.yaml)
+# pip install flash-linear-attention
