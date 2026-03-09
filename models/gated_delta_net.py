@@ -86,14 +86,16 @@ class GatedDeltaNetLayer(nn.Module):
         self.k_norm = _RMSNorm(self.head_dim)
 
     # ------------------------------------------------------------------
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_mask=None, kv_cache=None, position_offset=0):
         """
         Args:
-            x         : (B, T, C)  — input tensor
-            attn_mask : ignored    — GDN is inherently causal
+            x               : (B, T, C)  — input tensor
+            attn_mask       : ignored    — GDN is inherently causal
+            kv_cache        : ignored    — GDN uses recurrent state, not KV cache
+            position_offset : ignored
 
         Returns:
-            (B, T, C)
+            tuple of (output (B, T, C), None)  — None placeholder for KV cache compatibility
         """
         B, T, C = x.shape
         H, D = self.n_head, self.head_dim
@@ -132,4 +134,4 @@ class GatedDeltaNetLayer(nn.Module):
 
         # ── Merge heads and project ────────────────────────────────────
         o = o.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_dropout(self.o_proj(o))
+        return self.resid_dropout(self.o_proj(o)), None

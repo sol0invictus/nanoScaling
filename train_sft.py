@@ -265,7 +265,7 @@ def estimate_loss():
             mask = make_attn_mask(DocIds)
             
             with ctx:
-                logits, loss = model(X, Y, attn_mask=mask)
+                logits, loss, _ = model(X, Y, attn_mask=mask)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -319,7 +319,7 @@ while True:
         attn_mask = make_attn_mask(DocIds)
         
         with ctx:
-            logits, loss = model(X, Y, attn_mask=attn_mask)
+            logits, loss, _ = model(X, Y, attn_mask=attn_mask)
             loss = loss / config.gradient_accumulation_steps
             
         X, Y, DocIds = get_batch('train')
