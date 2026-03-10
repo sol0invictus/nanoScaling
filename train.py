@@ -388,6 +388,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
 tokens_seen = iter_num * tokens_per_iter
+_metrics_interval = config.metrics_log_interval if config.metrics_log_interval > 0 else config.log_interval
 
 while True:
 
@@ -404,20 +405,21 @@ while True:
             torch.cuda.empty_cache()
 
         if master_process:
+            # --- Console output ---
             loss_msg = f"step {iter_num}:"
             for k, v in losses.items():
                 loss_msg += f" {k} loss {v:.4f},"
             print(loss_msg)
 
-            # Write to TensorBoard
-            if config.tensorboard_log:
-                 for k, v in losses.items():
-                     tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
-
             # Track best 'val' loss for checkpoint_interval=0 (eval-coupled) mode
             current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
             if current_val_loss < best_val_loss:
                 best_val_loss = current_val_loss
+
+            # --- TensorBoard: val losses ---
+        if master_process and config.tensorboard_log:
+            for k, v in losses.items():
+                tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
 
     # 3. Checkpointing (decoupled from eval)
     _ckpt_interval = config.checkpoint_interval if config.checkpoint_interval > 0 else config.eval_interval
@@ -469,7 +471,7 @@ while True:
 
     # 5. Logging Gradients (optional)
     grad_norms = {}
-    if iter_num % config.log_interval == 0 and master_process and config.tensorboard_log:
+    if iter_num % _metrics_interval == 0 and master_process and config.tensorboard_log:
         if config.grad_clip == 0.0:
             scaler.unscale_(optimizer)
         for name, p in raw_model.named_parameters():
@@ -492,31 +494,34 @@ while True:
         if local_iter_num >= 5: # let the training loop settle
             mfu = raw_model.estimate_mfu(config.batch_size * config.gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+
+        # --- Console output ---
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
-        if config.tensorboard_log:
-            tb_writer.add_scalar("iter", iter_num, iter_num)
-            tb_writer.add_scalar("train/loss", lossf, iter_num)
-            tb_writer.add_scalar("lr", lr, iter_num)
-            tb_writer.add_scalar("mfu", running_mfu*100, iter_num)
-            tb_writer.add_scalar("tokens_seen", tokens_seen, iter_num)
+    # --- TensorBoard: train metrics ---
+    if iter_num % _metrics_interval == 0 and master_process and config.tensorboard_log:
+        tb_writer.add_scalar("iter", iter_num, iter_num)
+        tb_writer.add_scalar("train/loss", lossf, iter_num)
+        tb_writer.add_scalar("lr", lr, iter_num)
+        tb_writer.add_scalar("mfu", running_mfu*100, iter_num)
+        tb_writer.add_scalar("tokens_seen", tokens_seen, iter_num)
 
-            for name, val in grad_norms.items():
-                tb_writer.add_scalar(f"grad_norm/{name}", val, iter_num)
+        for name, val in grad_norms.items():
+            tb_writer.add_scalar(f"grad_norm/{name}", val, iter_num)
 
-            # Log weights occasionally
-            if iter_num % 100 == 0:
-                for name, p in raw_model.named_parameters():
-                    tb_writer.add_scalar(f"weight_norm/{name}", p.norm().item(), iter_num)
+        # Log weights occasionally
+        if iter_num % 100 == 0:
+            for name, p in raw_model.named_parameters():
+                tb_writer.add_scalar(f"weight_norm/{name}", p.norm().item(), iter_num)
 
-            for name, stats in activation_stats.items():
-                if stats:
-                    means = [s['mean'] for s in stats]
-                    stds = [s['std'] for s in stats]
-                    tb_writer.add_scalar(f"act_mean/{name}", sum(means)/len(means), iter_num)
-                    tb_writer.add_scalar(f"act_std/{name}", sum(stds)/len(stds), iter_num)
-            activation_stats = {}
-            tb_writer.flush()
+        for name, stats in activation_stats.items():
+            if stats:
+                means = [s['mean'] for s in stats]
+                stds = [s['std'] for s in stats]
+                tb_writer.add_scalar(f"act_mean/{name}", sum(means)/len(means), iter_num)
+                tb_writer.add_scalar(f"act_std/{name}", sum(stds)/len(stds), iter_num)
+        activation_stats = {}
+        tb_writer.flush()
 
     iter_num += 1
     local_iter_num += 1

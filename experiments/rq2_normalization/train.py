@@ -317,6 +317,7 @@ t0 = time.time()
 local_iter_num = 0
 running_mfu = -1.0
 tokens_seen = 0
+_metrics_interval = config.metrics_log_interval if config.metrics_log_interval > 0 else config.log_interval
 
 sharpness_X, sharpness_Y = get_batch('val') if 'val' in config.val_splits else (X, Y)
 
@@ -351,8 +352,10 @@ while True:
                 if not is_stable:
                     loss_msg += f" [UNSTABLE: {stability_result['issues'][:2]}]"
 
+            # --- Console output ---
             print(loss_msg)
 
+            # --- TensorBoard: val losses ---
             if tb_writer:
                 for k, v in losses.items():
                     tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
@@ -382,9 +385,9 @@ while True:
     if iter_num == 0 and config.eval_only:
         break
 
-    # Toggle activation hooks — only pay capture overhead on logging steps
+    # Toggle activation hooks — only pay capture overhead on metrics steps
     if spectral_logger:
-        if iter_num % config.log_interval == 0:
+        if iter_num % _metrics_interval == 0:
             spectral_logger.enable_hooks()
         else:
             spectral_logger.disable_hooks()
@@ -411,11 +414,11 @@ while True:
     if config.grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    elif master_process and spectral_logger and iter_num % config.log_interval == 0:
+    elif master_process and spectral_logger and iter_num % _metrics_interval == 0:
         scaler.unscale_(optimizer)
 
     # Spectral + stability logging
-    if master_process and spectral_logger and iter_num % config.log_interval == 0:
+    if master_process and spectral_logger and iter_num % _metrics_interval == 0:
         spectral_logger.log_step(
             step=iter_num,
             X=sharpness_X,
@@ -437,15 +440,18 @@ while True:
             mfu = raw_model.estimate_mfu(
                 config.batch_size * config.gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+
+        # --- Console output ---
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, "
               f"mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
-        if tb_writer:
-            tb_writer.add_scalar('train/loss', lossf, iter_num)
-            tb_writer.add_scalar('train/lr_adamw',
-                                 optimizer.param_groups[-1]['lr'], iter_num)
-            tb_writer.add_scalar('train/tokens_seen', tokens_seen, iter_num)
-            tb_writer.flush()
+    # --- TensorBoard: train metrics ---
+    if iter_num % _metrics_interval == 0 and master_process and tb_writer:
+        tb_writer.add_scalar('train/loss', lossf, iter_num)
+        tb_writer.add_scalar('train/lr_adamw',
+                             optimizer.param_groups[-1]['lr'], iter_num)
+        tb_writer.add_scalar('train/tokens_seen', tokens_seen, iter_num)
+        tb_writer.flush()
 
     iter_num += 1
     local_iter_num += 1
