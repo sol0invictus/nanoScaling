@@ -12,6 +12,7 @@ seaborn
 PyYAML
 pyarrow
 requests
+tensorboard
 
 # Optional: Mixture of Experts (configs/moe.yaml)
 # pip install megablocks einops

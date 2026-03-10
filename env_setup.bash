@@ -55,22 +55,52 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# Detect CUDA if not supplied
+# Detect CUDA version from multiple sources (nvcc often absent even with CUDA)
 # ---------------------------------------------------------------------------
+_detect_cuda_major() {
+    # 1. nvidia-smi (available whenever GPU drivers are installed)
+    if command -v nvidia-smi &>/dev/null; then
+        local ver
+        ver=$(nvidia-smi | grep -oP 'CUDA Version:\s*\K[0-9]+' | head -1)
+        [[ -n "$ver" ]] && { echo "$ver"; return; }
+    fi
+    # 2. nvcc (CUDA toolkit — often not on PATH, try common locations)
+    local nvcc_bin=""
+    for p in nvcc /usr/local/cuda/bin/nvcc /usr/cuda/bin/nvcc; do
+        command -v "$p" &>/dev/null && { nvcc_bin="$p"; break; }
+    done
+    if [[ -n "$nvcc_bin" ]]; then
+        local ver
+        ver=$("$nvcc_bin" --version | grep -oP 'release \K[0-9]+' | head -1)
+        [[ -n "$ver" ]] && { echo "$ver"; return; }
+    fi
+    # 3. /usr/local/cuda/version.json (CUDA 11.4+)
+    if [[ -f /usr/local/cuda/version.json ]]; then
+        local ver
+        ver=$(python3 -c "import json,sys; d=json.load(open('/usr/local/cuda/version.json')); print(d.get('cuda',d.get('cuda_nvcc',{})).get('version','').split('.')[0])" 2>/dev/null)
+        [[ -n "$ver" && "$ver" != "0" ]] && { echo "$ver"; return; }
+    fi
+    # 4. /usr/local/cuda/version.txt (older CUDA)
+    if [[ -f /usr/local/cuda/version.txt ]]; then
+        local ver
+        ver=$(grep -oP 'CUDA Version \K[0-9]+' /usr/local/cuda/version.txt | head -1)
+        [[ -n "$ver" ]] && { echo "$ver"; return; }
+    fi
+    echo ""
+}
+
 if [[ -z "$CUDA_VERSION" ]]; then
-    if command -v nvcc &>/dev/null; then
-        RAW=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
-        MAJOR=$(echo "$RAW" | cut -d. -f1)
-        MINOR=$(echo "$RAW" | cut -d. -f2)
-        if   [[ "$MAJOR" -ge 12 ]];                              then CUDA_VERSION="cu121"
-        elif [[ "$MAJOR" -eq 11 && "$MINOR" -ge 8 ]];           then CUDA_VERSION="cu118"
-        elif [[ "$MAJOR" -eq 11 ]];                              then CUDA_VERSION="cu117"
+    MAJOR=$(_detect_cuda_major)
+    if [[ -n "$MAJOR" ]]; then
+        if   [[ "$MAJOR" -ge 12 ]];  then CUDA_VERSION="cu121"
+        elif [[ "$MAJOR" -eq 11 ]];  then CUDA_VERSION="cu118"
         else CUDA_VERSION="cpu"
         fi
-        echo "Detected CUDA ${RAW} → PyTorch index: ${CUDA_VERSION}"
+        echo "Detected CUDA ${MAJOR}.x → PyTorch index: ${CUDA_VERSION}"
     else
         CUDA_VERSION="cpu"
-        echo "nvcc not found — will install CPU-only PyTorch"
+        echo "No CUDA detected — installing CPU-only PyTorch"
+        echo "  (Override with: bash env_setup.bash --cuda cu121)"
     fi
 fi
 
