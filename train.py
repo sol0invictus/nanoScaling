@@ -448,7 +448,7 @@ while True:
         if ddp:
             model.require_backward_grad_sync = (micro_step == config.gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss, _ = model(X, Y)
             loss = loss / config.gradient_accumulation_steps # scale loss
 
         # Async prefetch next batch

@@ -274,7 +274,7 @@ def estimate_loss():
              except FileNotFoundError:
                  continue
              with ctx:
-                 logits, loss = model(X, Y)
+                 logits, loss, _ = model(X, Y)
              losses[k] = loss.item()
         key = split
         if split.endswith('.bin'):
@@ -346,7 +346,7 @@ while True:
         if ddp:
             model.require_backward_grad_sync = (micro_step == config.gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss, _ = model(X, Y)
             loss = loss / config.gradient_accumulation_steps
         
         X, Y = get_batch('train')
