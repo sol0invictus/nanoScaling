@@ -337,6 +337,7 @@ t0 = time.time()
 local_iter_num = 0
 running_mfu = -1.0
 tokens_seen = iter_num * tokens_per_iter
+_metrics_interval = config.metrics_log_interval if config.metrics_log_interval > 0 else config.log_interval
 
 # Keep a fixed sharpness batch so measurements are comparable across steps
 sharpness_X, sharpness_Y = get_batch('val') if 'val' in config.val_splits else (X, Y)
@@ -392,9 +393,9 @@ while True:
     if iter_num == 0 and config.eval_only:
         break
 
-    # Toggle activation hooks — only pay capture overhead on logging steps
+    # Toggle activation hooks — only pay capture overhead on metrics steps
     if spectral_logger:
-        if iter_num % config.log_interval == 0:
+        if iter_num % _metrics_interval == 0:
             spectral_logger.enable_hooks()
         else:
             spectral_logger.disable_hooks()
@@ -414,12 +415,12 @@ while True:
     if config.grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    elif master_process and spectral_logger and iter_num % config.log_interval == 0:
+    elif master_process and spectral_logger and iter_num % _metrics_interval == 0:
         # Need to unscale before reading grads for logging
         scaler.unscale_(optimizer)
 
-    # --- Spectral + dynamics logging (grads available here, gated by log_interval) ---
-    if master_process and spectral_logger and iter_num % config.log_interval == 0:
+    # --- Spectral + dynamics logging (grads available here, gated by metrics_interval) ---
+    if master_process and spectral_logger and iter_num % _metrics_interval == 0:
         spectral_logger.log_step(
             step=iter_num,
             X=sharpness_X,
@@ -438,19 +439,21 @@ while True:
     t0 = t1
     tokens_seen += tokens_per_iter
 
+    lossf = loss.item() * config.gradient_accumulation_steps
+    lr_muon = optimizer.param_groups[0]['lr']
+    lr_adamw = optimizer.param_groups[-1]['lr']
+
     if iter_num % config.log_interval == 0 and master_process:
-        lossf = loss.item() * config.gradient_accumulation_steps
         if local_iter_num >= 5:
             mfu = raw_model.estimate_mfu(
                 config.batch_size * config.gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        lr_muon = optimizer.param_groups[0]['lr']
-        lr_adamw = optimizer.param_groups[-1]['lr']
 
         # --- Console output ---
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, "
               f"mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
+    if iter_num % _metrics_interval == 0 and master_process:
         # --- TensorBoard: train metrics ---
         if tb_writer:
             tb_writer.add_scalar('train/loss', lossf, iter_num)

@@ -388,6 +388,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
 tokens_seen = iter_num * tokens_per_iter
+_metrics_interval = config.metrics_log_interval if config.metrics_log_interval > 0 else config.log_interval
 
 while True:
 
@@ -415,7 +416,7 @@ while True:
             if current_val_loss < best_val_loss:
                 best_val_loss = current_val_loss
 
-        # --- TensorBoard: val losses ---
+            # --- TensorBoard: val losses ---
         if master_process and config.tensorboard_log:
             for k, v in losses.items():
                 tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
@@ -470,7 +471,7 @@ while True:
 
     # 5. Logging Gradients (optional)
     grad_norms = {}
-    if iter_num % config.log_interval == 0 and master_process and config.tensorboard_log:
+    if iter_num % _metrics_interval == 0 and master_process and config.tensorboard_log:
         if config.grad_clip == 0.0:
             scaler.unscale_(optimizer)
         for name, p in raw_model.named_parameters():
@@ -498,7 +499,7 @@ while True:
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
     # --- TensorBoard: train metrics ---
-    if iter_num % config.log_interval == 0 and master_process and config.tensorboard_log:
+    if iter_num % _metrics_interval == 0 and master_process and config.tensorboard_log:
         tb_writer.add_scalar("iter", iter_num, iter_num)
         tb_writer.add_scalar("train/loss", lossf, iter_num)
         tb_writer.add_scalar("lr", lr, iter_num)

@@ -14,7 +14,8 @@ class ExperimentConfig:
     # I/O
     out_dir: str = 'out'
     eval_interval: int = 2000
-    log_interval: int = 1
+    log_interval: int = 1          # console print frequency (steps)
+    metrics_log_interval: int = 0  # TensorBoard/CSV logging frequency (0 = same as log_interval)
     eval_iters: int = 200
     eval_only: bool = False
     checkpoint_interval: int = 0   # save checkpoint every N steps (0 = tie to eval_interval)

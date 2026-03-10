@@ -6,6 +6,7 @@
 out_dir: "out"
 eval_interval: 2000
 log_interval: 1
+metrics_log_interval: 10   # TensorBoard/CSV logging frequency (0 = same as log_interval)
 eval_iters: 5
 eval_interval: 50
 eval_only: false
