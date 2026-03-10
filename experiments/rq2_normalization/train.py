@@ -27,6 +27,7 @@ Usage:
 import os
 import sys
 import time
+import gc
 import math
 import pickle
 import json
@@ -124,6 +125,7 @@ if master_process:
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True  # auto-tune kernels for fixed input sizes
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16,
            'float16': torch.float16}[config.dtype]
@@ -263,6 +265,21 @@ if master_process:
 # Evaluation
 # ---------------------------------------------------------------------------
 
+def _reduce(mean_loss, loader):
+    """Weighted all_reduce(SUM)/effective_world — unbiased even when
+    world_size % effective_world != 0 (row groups don't divide evenly).
+    Bin loaders (no .effective_world attr) draw independent random batches
+    per rank, so plain AVG is correct — same as effective_world==world_size.
+    """
+    if not ddp:
+        return mean_loss
+    eff_world = getattr(loader, 'effective_world', ddp_world_size)
+    eff_rank  = ddp_rank % eff_world
+    n_sharing = (ddp_world_size // eff_world) + (1 if eff_rank < ddp_world_size % eff_world else 0)
+    t = torch.tensor(mean_loss / n_sharing, device=device)
+    torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+    return t.item() / eff_world
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -277,8 +294,9 @@ def estimate_loss():
             with ctx:
                 _, loss = model(X, Y)
             losses[k] = loss.item()
+        loader = _train_loader if split == 'train' else _val_loaders.get(split)
         key = split[:-4] if split.endswith('.bin') else split
-        out[key] = losses.mean()
+        out[key] = _reduce(losses.mean().item(), loader)
     for ds_name, loader in _extra_val_loaders.items():
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
@@ -286,7 +304,7 @@ def estimate_loss():
             with ctx:
                 _, loss = model(X, Y)
             losses[k] = loss.item()
-        out[ds_name] = losses.mean()
+        out[ds_name] = _reduce(losses.mean().item(), loader)
     model.train()
     return out
 
@@ -309,55 +327,67 @@ stability_log = []
 while True:
     apply_lr(iter_num)
 
-    # Evaluation + checkpointing
-    if iter_num % config.eval_interval == 0 and master_process:
+    # Evaluation + checkpointing — all ranks call estimate_loss() for all_reduce
+    if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
-        loss_msg = f"step {iter_num}:"
-        for k, v in losses.items():
-            loss_msg += f" {k}_loss={v:.4f}"
-
+        if device_type == 'cuda':
+            gc.collect()
+            torch.cuda.empty_cache()
         current_val_loss = losses.get('val', next(iter(losses.values())))
 
-        # --- RQ2 Stability check ---
-        if spectral_logger:
-            stability_result = spectral_logger.check_stability(
-                iter_num, current_val_loss.item(), tb_writer)
-            is_stable = stability_result['is_stable']
-            stability_log.append({'step': iter_num,
-                                   'val_loss': current_val_loss.item(),
-                                   **stability_result})
-            if not is_stable:
-                loss_msg += f" [UNSTABLE: {stability_result['issues'][:2]}]"
-
-        print(loss_msg)
-
-        if tb_writer:
+        if master_process:
+            loss_msg = f"step {iter_num}:"
             for k, v in losses.items():
-                tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
+                loss_msg += f" {k}_loss={v:.4f}"
 
-        if current_val_loss < best_val_loss or config.always_save_checkpoint:
-            best_val_loss = current_val_loss
-            if iter_num > 0:
-                ckpt = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'config': config.to_dict(),
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                }
-                torch.save(ckpt, os.path.join(config.out_dir, 'ckpt.pt'))
+            # --- RQ2 Stability check ---
+            if spectral_logger:
+                stability_result = spectral_logger.check_stability(
+                    iter_num, current_val_loss, tb_writer)
+                is_stable = stability_result['is_stable']
+                stability_log.append({'step': iter_num,
+                                       'val_loss': current_val_loss,
+                                       **stability_result})
+                if not is_stable:
+                    loss_msg += f" [UNSTABLE: {stability_result['issues'][:2]}]"
 
-        if spectral_logger and iter_num % svd_checkpoint_freq == 0 and iter_num > 0:
-            spectral_logger.log_checkpoint(iter_num)
+            print(loss_msg)
 
-        # Early stop on catastrophic instability (NaN loss or weight explosion)
-        if not math.isfinite(current_val_loss.item()):
-            print(f"DIVERGED at step {iter_num}. Stopping.")
+            if tb_writer:
+                for k, v in losses.items():
+                    tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
+
+            if current_val_loss < best_val_loss or config.always_save_checkpoint:
+                best_val_loss = current_val_loss
+                if iter_num > 0:
+                    ckpt = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'config': config.to_dict(),
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                    }
+                    torch.save(ckpt, os.path.join(config.out_dir, 'ckpt.pt'))
+
+            if spectral_logger and iter_num % svd_checkpoint_freq == 0 and iter_num > 0:
+                spectral_logger.log_checkpoint(iter_num)
+
+        # Early stop — all ranks check and break together
+        if not math.isfinite(current_val_loss):
+            if master_process:
+                print(f"DIVERGED at step {iter_num}. Stopping.")
             is_stable = False
             break
 
     if iter_num == 0 and config.eval_only:
         break
+
+    # Toggle activation hooks — only pay capture overhead on logging steps
+    if spectral_logger:
+        if iter_num % config.log_interval == 0:
+            spectral_logger.enable_hooks()
+        else:
+            spectral_logger.disable_hooks()
 
     # Forward + backward
     for micro_step in range(config.gradient_accumulation_steps):
@@ -381,11 +411,11 @@ while True:
     if config.grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    elif master_process and spectral_logger:
+    elif master_process and spectral_logger and iter_num % config.log_interval == 0:
         scaler.unscale_(optimizer)
 
     # Spectral + stability logging
-    if master_process and spectral_logger:
+    if master_process and spectral_logger and iter_num % config.log_interval == 0:
         spectral_logger.log_step(
             step=iter_num,
             X=sharpness_X,

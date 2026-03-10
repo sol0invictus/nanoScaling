@@ -68,10 +68,12 @@ class CSVLogger:
     SCHEMA: Dict[str, List[str]] = {
         'weight':      ['step', 'param', 'stable_rank', 'nuc_frob_ratio',
                         'spectral_entropy', 'effective_rank'],
-        'grad':        ['step', 'param', 'fro_norm', 'spec_norm', 'direction_cosine'],
+        'grad':        ['step', 'param', 'fro_norm', 'rms_norm', 'spec_norm', 'direction_cosine'],
         'activations': ['step', 'layer', 'mean', 'var', 'std', 'kurtosis',
                         'dead_fraction', 'isotropy'],
         'sharpness':   ['step', 'value'],
+        'training':    ['step', 'train_loss', 'val_loss', 'lr_muon', 'lr_adamw',
+                        'mfu', 'tokens_seen'],
     }
 
     def __init__(self, log_dir: str):
@@ -191,14 +193,15 @@ def full_svd_stats(W: torch.Tensor) -> Dict:
 
 @torch.no_grad()
 def grad_norms(g: torch.Tensor) -> Dict[str, float]:
-    """Frobenius and spectral norm of a gradient matrix."""
+    """Frobenius, RMS, and spectral norm of a gradient tensor."""
     g_f = g.float()
     fro = g_f.norm('fro').item()
+    rms = fro / math.sqrt(g_f.numel())
     try:
         spec = torch.linalg.matrix_norm(g_f, ord=2).item()
     except Exception:
         spec = float('nan')
-    return {'fro': fro, 'spec': spec}
+    return {'fro': fro, 'rms': rms, 'spec': spec}
 
 
 @torch.no_grad()
@@ -270,7 +273,7 @@ def measure_sharpness(
     """Sharpness via random perturbation: mean increase in loss over n_samples trials."""
     model.eval()
     with ctx:
-        _, base_loss = model(X, Y)
+        _, base_loss, _ = model(X, Y)
     base = base_loss.item()
 
     saved = {n: p.data.clone() for n, p in model.named_parameters()}
@@ -280,7 +283,7 @@ def measure_sharpness(
         for p in model.parameters():
             p.data.add_(torch.randn_like(p.data) * epsilon)
         with ctx:
-            _, perturbed = model(X, Y)
+            _, perturbed, _ = model(X, Y)
         deltas.append(perturbed.item() - base)
         for n, p in model.named_parameters():
             p.data.copy_(saved[n])
@@ -432,6 +435,7 @@ class SpectralLogger:
         # Activation cache populated by forward hooks
         self._act_cache: Dict[str, torch.Tensor] = {}
         self._hooks = []
+        self._hooks_enabled = True
         self._register_hooks()
 
     # ------------------------------------------------------------------
@@ -448,11 +452,22 @@ class SpectralLogger:
 
     def _make_hook(self, name: str):
         def hook(module, inp, out):
+            if not self._hooks_enabled:
+                return
             # Block.forward returns (x, aux_loss)
             tensor = out[0] if isinstance(out, tuple) else out
             if isinstance(tensor, torch.Tensor):
                 self._act_cache[name] = tensor.detach()
         return hook
+
+    def enable_hooks(self):
+        """Re-enable activation capture (call before the logging step's forward pass)."""
+        self._hooks_enabled = True
+
+    def disable_hooks(self):
+        """Disable activation capture between logging steps to save overhead."""
+        self._hooks_enabled = False
+        self._act_cache.clear()
 
     def remove_hooks(self):
         for h in self._hooks:
@@ -485,18 +500,16 @@ class SpectralLogger:
                     and X is not None and ctx is not None)
 
         for name, p in model.named_parameters():
-            if p.dim() != 2:
-                continue
-
-            W = p.detach()
             g = p.grad.detach() if p.grad is not None else None
 
-            # --- Gradient metrics ---
+            # --- Gradient metrics (all parameters) ---
             if g is not None:
                 gn = grad_norms(g)
                 if w:
                     w.add_scalar(f'grad/fro_norm/{name}', gn['fro'], step)
-                    w.add_scalar(f'grad/spec_norm/{name}', gn['spec'], step)
+                    w.add_scalar(f'grad/rms_norm/{name}', gn['rms'], step)
+                    if p.dim() == 2:
+                        w.add_scalar(f'grad/spec_norm/{name}', gn['spec'], step)
                 if self.stability is not None:
                     self.stability.update_grad_norm(name, gn['fro'])
                 sim = None
@@ -508,11 +521,16 @@ class SpectralLogger:
                 if self.csv:
                     self.csv.write('grad', {
                         'step': step, 'param': name,
-                        'fro_norm': gn['fro'], 'spec_norm': gn['spec'],
+                        'fro_norm': gn['fro'],
+                        'rms_norm': gn['rms'],
+                        'spec_norm': gn['spec'] if p.dim() == 2 else '',
                         'direction_cosine': sim if sim is not None else '',
                     })
 
-            # --- Weight geometry: stable rank + top-k SVD ---
+            # --- Weight geometry: stable rank + top-k SVD (2D only) ---
+            if p.dim() != 2:
+                continue
+            W = p.detach()
             sr = stable_rank(W)
             svd_m = topk_svd_metrics(W, k=self.topk)
             if w:

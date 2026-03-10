@@ -30,6 +30,7 @@ or by passing a YAML config file (e.g., python train.py config/params.yaml).
 
 import os
 import time
+import gc
 import math
 import pickle
 import json
@@ -121,6 +122,7 @@ if master_process:
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+torch.backends.cudnn.benchmark = True # auto-tune kernels for fixed input sizes
 device_type = 'cuda' if 'cuda' in config.device else 'cpu'
 
 # Precision setup
@@ -397,6 +399,9 @@ while True:
     # 2. Evaluation — all ranks participate so all_reduce in estimate_loss works.
     if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
+        if device_type == 'cuda':
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if master_process:
             loss_msg = f"step {iter_num}:"

@@ -30,6 +30,7 @@ to its own initial LR, so Muon's 0.02 and AdamW's 3e-4 decay in sync.
 import os
 import sys
 import time
+import gc
 import math
 import pickle
 import json
@@ -137,6 +138,7 @@ if master_process:
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True  # auto-tune kernels for fixed input sizes
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16,
            'float16': torch.float16}[config.dtype]
@@ -283,6 +285,21 @@ def apply_lr(it: int):
 # Evaluation
 # ---------------------------------------------------------------------------
 
+def _reduce(mean_loss, loader):
+    """Weighted all_reduce(SUM)/effective_world — unbiased even when
+    world_size % effective_world != 0 (row groups don't divide evenly).
+    Bin loaders (no .effective_world attr) draw independent random batches
+    per rank, so plain AVG is correct — same as effective_world==world_size.
+    """
+    if not ddp:
+        return mean_loss
+    eff_world = getattr(loader, 'effective_world', ddp_world_size)
+    eff_rank  = ddp_rank % eff_world
+    n_sharing = (ddp_world_size // eff_world) + (1 if eff_rank < ddp_world_size % eff_world else 0)
+    t = torch.tensor(mean_loss / n_sharing, device=device)
+    torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+    return t.item() / eff_world
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -295,18 +312,19 @@ def estimate_loss():
             except FileNotFoundError:
                 continue
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
+        loader = _train_loader if split == 'train' else _val_loaders.get(split)
         key = split[:-4] if split.endswith('.bin') else split
-        out[key] = losses.mean()
+        out[key] = _reduce(losses.mean().item(), loader)
     for ds_name, loader in _extra_val_loaders.items():
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
             X, Y = next(loader)
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
-        out[ds_name] = losses.mean()
+        out[ds_name] = _reduce(losses.mean().item(), loader)
     model.train()
     return out
 
@@ -326,39 +344,57 @@ sharpness_X, sharpness_Y = get_batch('val') if 'val' in config.val_splits else (
 while True:
     apply_lr(iter_num)
 
-    # Evaluation + checkpointing
-    if iter_num % config.eval_interval == 0 and master_process:
+    # Evaluation + checkpointing — all ranks call estimate_loss() for all_reduce
+    if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
-        loss_msg = f"step {iter_num}:"
-        for k, v in losses.items():
-            loss_msg += f" {k}_loss={v:.4f}"
-        print(loss_msg)
-
-        if tb_writer:
+        if device_type == 'cuda':
+            gc.collect()
+            torch.cuda.empty_cache()
+        if master_process:
+            loss_msg = f"step {iter_num}:"
             for k, v in losses.items():
-                tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
+                loss_msg += f" {k}_loss={v:.4f}"
+            print(loss_msg)
 
-        current_val_loss = losses.get('val', next(iter(losses.values())))
+            if tb_writer:
+                for k, v in losses.items():
+                    tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
 
-        if current_val_loss < best_val_loss or config.always_save_checkpoint:
-            best_val_loss = current_val_loss
-            if iter_num > 0:
-                ckpt = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'config': config.to_dict(),
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                }
-                torch.save(ckpt, os.path.join(config.out_dir, 'ckpt.pt'))
-                print(f"Saved checkpoint at step {iter_num}")
+            current_val_loss = losses.get('val', next(iter(losses.values())))
+            if spectral_logger and spectral_logger.csv:
+                spectral_logger.csv.write('training', {
+                    'step': iter_num,
+                    'train_loss': '',
+                    'val_loss': current_val_loss.item() if hasattr(current_val_loss, 'item') else current_val_loss,
+                    'lr_muon': '', 'lr_adamw': '', 'mfu': '', 'tokens_seen': '',
+                })
 
-        # Full SVD checkpoint dump
-        if spectral_logger and iter_num % svd_checkpoint_freq == 0 and iter_num > 0:
-            spectral_logger.log_checkpoint(iter_num)
+            if current_val_loss < best_val_loss or config.always_save_checkpoint:
+                best_val_loss = current_val_loss
+                if iter_num > 0:
+                    ckpt = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'config': config.to_dict(),
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                    }
+                    torch.save(ckpt, os.path.join(config.out_dir, 'ckpt.pt'))
+                    print(f"Saved checkpoint at step {iter_num}")
+
+            # Full SVD checkpoint dump
+            if spectral_logger and iter_num % svd_checkpoint_freq == 0 and iter_num > 0:
+                spectral_logger.log_checkpoint(iter_num)
 
     if iter_num == 0 and config.eval_only:
         break
+
+    # Toggle activation hooks — only pay capture overhead on logging steps
+    if spectral_logger:
+        if iter_num % config.log_interval == 0:
+            spectral_logger.enable_hooks()
+        else:
+            spectral_logger.disable_hooks()
 
     # Forward + backward
     for micro_step in range(config.gradient_accumulation_steps):
@@ -375,12 +411,12 @@ while True:
     if config.grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    elif master_process and spectral_logger:
+    elif master_process and spectral_logger and iter_num % config.log_interval == 0:
         # Need to unscale before reading grads for logging
         scaler.unscale_(optimizer)
 
-    # --- Spectral + dynamics logging (grads available here) ---
-    if master_process and spectral_logger:
+    # --- Spectral + dynamics logging (grads available here, gated by log_interval) ---
+    if master_process and spectral_logger and iter_num % config.log_interval == 0:
         spectral_logger.log_step(
             step=iter_num,
             X=sharpness_X,
@@ -408,15 +444,25 @@ while True:
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, "
               f"mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
+        lr_muon = optimizer.param_groups[0]['lr']
+        lr_adamw = optimizer.param_groups[-1]['lr']
         if tb_writer:
             tb_writer.add_scalar('train/loss', lossf, iter_num)
-            tb_writer.add_scalar('train/lr_adamw',
-                                 optimizer.param_groups[-1]['lr'], iter_num)
-            tb_writer.add_scalar('train/lr_special',
-                                 optimizer.param_groups[0]['lr'], iter_num)
+            tb_writer.add_scalar('train/lr/muon', lr_muon, iter_num)
+            tb_writer.add_scalar('train/lr/adamw', lr_adamw, iter_num)
             tb_writer.add_scalar('train/mfu', running_mfu * 100, iter_num)
             tb_writer.add_scalar('train/tokens_seen', tokens_seen, iter_num)
             tb_writer.flush()
+        if spectral_logger and spectral_logger.csv:
+            spectral_logger.csv.write('training', {
+                'step': iter_num,
+                'train_loss': lossf,
+                'val_loss': '',
+                'lr_muon': lr_muon,
+                'lr_adamw': lr_adamw,
+                'mfu': running_mfu,
+                'tokens_seen': tokens_seen,
+            })
 
     iter_num += 1
     local_iter_num += 1

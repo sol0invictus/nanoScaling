@@ -1,50 +1,72 @@
 # RQ1 Ablation: Muon with ns_steps=10 (higher orthogonalization quality)
 # Tests if more NS steps yield stronger spectral regularization.
+# Identical to 125m_muon.yaml except muon_ns_steps=10.
 
 out_dir: out/rq1/125m_muon_ns10
 tensorboard_run_name: rq1_125m_muon_ns10
 tensorboard_log: true
 
-dataset: /home/nanoScaling/data/shakespeare
-# dataset: openwebtext
+eval_interval: 50
+log_interval: 10
+eval_iters: 5
+eval_only: false
+checkpoint_interval: 100
+always_save_checkpoint: true
+keep_last_n_checkpoints: 3
+init_from: "scratch"
 
+# Data
+dataset: "/home/nanoScaling/training_data/openwebtext"
+
+val_datasets:
+  - /home/nanoScaling/val/code_val
+  - /home/nanoScaling/val/math_val
+  - /home/nanoScaling/val/wikitext_val
+
+gradient_accumulation_steps: 40
+batch_size: 12
+block_size: 1024
+
+# Model Architecture
 n_layer: 12
 n_head: 12
 n_embd: 768
-block_size: 1024
 bias: false
 dropout: 0.0
 
+# Architecture Toggles
 use_rmsnorm: true
 use_rope: true
 use_swiglu: true
+
 norm_position: pre
 norm_affine: true
 
+# Optimizer: Muon — ns_steps=10 ablation
 optimizer: muon
 muon_lr: 0.02
 muon_momentum: 0.95
-muon_ns_steps: 10      # ← ablation: more Newton-Schulz steps
+muon_ns_steps: 10      # ← ablation: more Newton-Schulz steps (default=5)
 learning_rate: 3e-4
 weight_decay: 0.1
 beta1: 0.9
 beta2: 0.95
 grad_clip: 1.0
 
+# LR Scheduler
 decay_lr: true
-warmup_iters: 800
+warmup_iters: 2000
 lr_decay_iters: 40000
-min_lr: 3e-5
+min_lr: 6e-5
 
-batch_size: 12
-gradient_accumulation_steps: 40
 max_iters: 40000
 
-eval_interval: 500
-log_interval: 10
-eval_iters: 100
-always_save_checkpoint: true
+# System
+device: "cuda"
+dtype: "bfloat16"
+compile: true
+backend: "nccl"
 
-device: cuda
-dtype: bfloat16
-compile: false
+# Parametrization
+parametrization:
+  mode: "SP"

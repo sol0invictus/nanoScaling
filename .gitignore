@@ -16,3 +16,4 @@ wandb/
 research_plan/
 *.parquet
 val/
+training_data/

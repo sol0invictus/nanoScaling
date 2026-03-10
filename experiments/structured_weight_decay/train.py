@@ -6,6 +6,7 @@ regularization (row-wise or column-wise) to weight matrices.
 
 import os
 import time
+import gc
 import math
 import pickle
 import json
@@ -138,8 +139,9 @@ if master_process:
     os.makedirs(config.out_dir, exist_ok=True)
 
 torch.manual_seed(1337 + seed_offset)
-torch.backends.cuda.matmul.allow_tf32 = True 
-torch.backends.cudnn.allow_tf32 = True 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True  # auto-tune kernels for fixed input sizes 
 device_type = 'cuda' if 'cuda' in config.device else 'cpu'
 
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[config.dtype]
@@ -251,7 +253,7 @@ checkpoint = None
 if config.compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
-    model = torch.compile(model) 
+    model = torch.compile(model)
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
@@ -259,6 +261,21 @@ if ddp:
 # -----------------------------------------------------------------------------
 # Training Utilities
 # -----------------------------------------------------------------------------
+
+def _reduce(mean_loss, loader):
+    """Weighted all_reduce(SUM)/effective_world — unbiased even when
+    world_size % effective_world != 0 (row groups don't divide evenly).
+    Bin loaders (no .effective_world attr) draw independent random batches
+    per rank, so plain AVG is correct — same as effective_world==world_size.
+    """
+    if not ddp:
+        return mean_loss
+    eff_world = getattr(loader, 'effective_world', ddp_world_size)
+    eff_rank  = ddp_rank % eff_world
+    n_sharing = (ddp_world_size // eff_world) + (1 if eff_rank < ddp_world_size % eff_world else 0)
+    t = torch.tensor(mean_loss / n_sharing, device=device)
+    torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+    return t.item() / eff_world
 
 @torch.no_grad()
 def estimate_loss():
@@ -278,8 +295,8 @@ def estimate_loss():
              losses[k] = loss.item()
         key = split
         if split.endswith('.bin'):
-            key = split[:-4] 
-        out[key] = losses.mean()
+            key = split[:-4]
+        out[key] = _reduce(losses.mean().item(), None)
     model.train()
     return out
 
@@ -313,31 +330,36 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    if iter_num % config.eval_interval == 0 and master_process:
+    # Evaluation + checkpointing — all ranks call estimate_loss() for all_reduce
+    if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
-        loss_msg = f"step {iter_num}:"
-        for k, v in losses.items():
-            loss_msg += f" {k} loss {v:.4f},"
-        print(loss_msg)
-        
-        if config.tensorboard_log:
-             for k, v in losses.items():
-                 tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
+        if device_type == 'cuda':
+            gc.collect()
+            torch.cuda.empty_cache()
+        if master_process:
+            loss_msg = f"step {iter_num}:"
+            for k, v in losses.items():
+                loss_msg += f" {k} loss {v:.4f},"
+            print(loss_msg)
 
-        current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
-        
-        if current_val_loss < best_val_loss or config.always_save_checkpoint:
-            best_val_loss = current_val_loss
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'config': config.to_dict(),
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                }
-                print(f"saving checkpoint to {config.out_dir}")
-                torch.save(checkpoint, os.path.join(config.out_dir, 'ckpt.pt'))
+            if config.tensorboard_log:
+                for k, v in losses.items():
+                    tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
+
+            current_val_loss = losses.get('val', list(losses.values())[0] if losses else 0.0)
+
+            if current_val_loss < best_val_loss or config.always_save_checkpoint:
+                best_val_loss = current_val_loss
+                if iter_num > 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'config': config.to_dict(),
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                    }
+                    print(f"saving checkpoint to {config.out_dir}")
+                    torch.save(checkpoint, os.path.join(config.out_dir, 'ckpt.pt'))
     
     if iter_num == 0 and config.eval_only:
         break
