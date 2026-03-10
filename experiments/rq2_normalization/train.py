@@ -351,8 +351,10 @@ while True:
                 if not is_stable:
                     loss_msg += f" [UNSTABLE: {stability_result['issues'][:2]}]"
 
+            # --- Console output ---
             print(loss_msg)
 
+            # --- TensorBoard: val losses ---
             if tb_writer:
                 for k, v in losses.items():
                     tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
@@ -437,9 +439,12 @@ while True:
             mfu = raw_model.estimate_mfu(
                 config.batch_size * config.gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+
+        # --- Console output ---
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, "
               f"mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
+        # --- TensorBoard: train metrics ---
         if tb_writer:
             tb_writer.add_scalar('train/loss', lossf, iter_num)
             tb_writer.add_scalar('train/lr_adamw',

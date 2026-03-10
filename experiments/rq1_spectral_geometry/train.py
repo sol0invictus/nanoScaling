@@ -351,16 +351,19 @@ while True:
             gc.collect()
             torch.cuda.empty_cache()
         if master_process:
+            # --- Console output ---
             loss_msg = f"step {iter_num}:"
             for k, v in losses.items():
                 loss_msg += f" {k}_loss={v:.4f}"
             print(loss_msg)
 
+            current_val_loss = losses.get('val', next(iter(losses.values())))
+
+            # --- TensorBoard: val losses ---
             if tb_writer:
                 for k, v in losses.items():
                     tb_writer.add_scalar(f'val/loss_{k}', v, iter_num)
 
-            current_val_loss = losses.get('val', next(iter(losses.values())))
             if spectral_logger and spectral_logger.csv:
                 spectral_logger.csv.write('training', {
                     'step': iter_num,
@@ -441,11 +444,14 @@ while True:
             mfu = raw_model.estimate_mfu(
                 config.batch_size * config.gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+        lr_muon = optimizer.param_groups[0]['lr']
+        lr_adamw = optimizer.param_groups[-1]['lr']
+
+        # --- Console output ---
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, "
               f"mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
-        lr_muon = optimizer.param_groups[0]['lr']
-        lr_adamw = optimizer.param_groups[-1]['lr']
+        # --- TensorBoard: train metrics ---
         if tb_writer:
             tb_writer.add_scalar('train/loss', lossf, iter_num)
             tb_writer.add_scalar('train/lr/muon', lr_muon, iter_num)
@@ -453,6 +459,7 @@ while True:
             tb_writer.add_scalar('train/mfu', running_mfu * 100, iter_num)
             tb_writer.add_scalar('train/tokens_seen', tokens_seen, iter_num)
             tb_writer.flush()
+
         if spectral_logger and spectral_logger.csv:
             spectral_logger.csv.write('training', {
                 'step': iter_num,
