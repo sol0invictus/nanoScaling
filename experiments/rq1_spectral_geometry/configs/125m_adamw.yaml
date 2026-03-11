@@ -1,6 +1,6 @@
 # RQ1 Baseline: 125M AdamW + Pre-RMSNorm
-# Trains to 20B tokens (~40K iters at ~512K tokens/iter).
-# For quick iteration use max_iters=1000 and dataset=shakespeare_char.
+# Trains to 5B tokens (~2x Chinchilla-optimal for 125M params; ~5086 iters at ~1M tokens/iter).
+# For quick iteration use max_iters=500 and dataset=shakespeare_char.
 # Model — 125M (GPT-2 small)
 
 
@@ -8,12 +8,12 @@ out_dir: out/rq1/125m_adamw
 tensorboard_run_name: rq1_125m_adamw
 tensorboard_log: true
 
-eval_interval: 50
-log_interval: 10
-metrics_log_interval: 50   # TensorBoard/CSV logging frequency (0 = same as log_interval)
+eval_interval: 500
+log_interval: 1
+metrics_log_interval: 100   # TensorBoard/CSV logging frequency (0 = same as log_interval)
 eval_iters: 5
 eval_only: false
-checkpoint_interval: 100    # 0 = save at eval_interval; set > 0 to decouple (e.g. 5000)
+checkpoint_interval: 1000    # 0 = save at eval_interval; set > 0 to decouple (e.g. 5000)
 always_save_checkpoint: true
 keep_last_n_checkpoints: 3  # keep N most recent ckpt_NNNNNNN.pt files (0 = keep all)
 init_from: "scratch" # 'scratch', 'resume', 'gpt2*'
@@ -29,15 +29,14 @@ val_datasets:
   - /home/nanoScaling/val/math_val
   - /home/nanoScaling/val/wikitext_val
 
-gradient_accumulation_steps: 40 # 5 * 8 (example)
-batch_size: 12
-block_size: 1024
+gradient_accumulation_steps: 16 # 5 * 8 (example)
+batch_size: 32
+block_size: 2048
 
 # Model Architecture
 n_layer: 12
 n_head: 12
 n_embd: 768
-block_size: 1024
 bias: false
 dropout: 0.0
 
@@ -63,11 +62,11 @@ grad_clip: 1.0
 
 # LR Scheduler
 decay_lr: true
-warmup_iters: 2000
-lr_decay_iters: 40000
+warmup_iters: 200
+lr_decay_iters: 5000
 min_lr: 6e-5
 
-max_iters: 40000
+max_iters: 5000
 
 # System
 device: "cuda"
