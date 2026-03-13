@@ -55,7 +55,7 @@ norm_affine: true
 optimizer: muon
 muon_lr: 0.02
 muon_momentum: 0.95
-muon_ns_steps: 5
+muon_ns_steps: 3
 learning_rate: 3e-4    # AdamW learning rate for 1D params
 weight_decay: 0.1
 beta1: 0.9

@@ -392,6 +392,7 @@ class GPTConfig:
     muon_lr: float = 0.02
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
+    muon_weight_decay: float = 0.0
 
 
 
@@ -628,7 +629,8 @@ class GPT(nn.Module):
                 muon_lr = getattr(self.config, 'muon_lr', 0.02)
                 muon_momentum = getattr(self.config, 'muon_momentum', 0.95)
                 muon_ns_steps = getattr(self.config, 'muon_ns_steps', 5)
-                optimizer1 = Muon(special_params, lr=muon_lr, momentum=muon_momentum, ns_steps=muon_ns_steps)
+                muon_weight_decay = getattr(self.config, 'muon_weight_decay', 0.0)
+                optimizer1 = Muon(special_params, lr=muon_lr, momentum=muon_momentum, ns_steps=muon_ns_steps, weight_decay=muon_weight_decay)
             elif optimizer_name == 'scion':
                 from optimizers.scion import Scion
                 # Scion defaults from config or defaults

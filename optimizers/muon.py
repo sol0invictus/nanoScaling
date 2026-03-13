@@ -26,13 +26,16 @@ class Muon(torch.optim.Optimizer):
 
     Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-processing step.
     In this way, the optimizer runs the top singular vector of the gradient on SGD-momentum.
+
+    weight_decay is applied in a decoupled manner (like AdamW): p = p - lr * (orthogonalized_grad + wd * p)
     """
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=0.0):
         self.lr = lr
         self.momentum = momentum
         self.nesterov = nesterov
         self.ns_steps = ns_steps
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+        self.weight_decay = weight_decay
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
     def step(self):
@@ -41,6 +44,7 @@ class Muon(torch.optim.Optimizer):
             momentum = group['momentum']
             nesterov = group['nesterov']
             ns_steps = group['ns_steps']
+            weight_decay = group['weight_decay']
 
             for p in group['params']:
                 if p.grad is None:
@@ -64,5 +68,9 @@ class Muon(torch.optim.Optimizer):
                 # If the tensor is not 2D, we just skip this step and it effectively becomes SGD
                 if g.ndim == 2:
                     g = zeropower_via_newtonschulz5(g, steps=ns_steps)
+
+                # decoupled weight decay applied before the gradient step
+                if weight_decay != 0.0:
+                    p.data.mul_(1.0 - lr * weight_decay)
 
                 p.data.add_(g, alpha=-lr)

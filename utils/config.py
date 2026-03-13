@@ -83,6 +83,7 @@ class ExperimentConfig:
     muon_lr: float = 0.02
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
+    muon_weight_decay: float = 0.0
 
     # Scion Optimizer Args
     scion_norm: str = 'Auto'
