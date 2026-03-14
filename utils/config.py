@@ -109,6 +109,11 @@ class ExperimentConfig:
     dtype: str = 'bfloat16'
     compile: bool = True
     backend: str = 'nccl'
+    # Tensor Parallelism: split each layer across this many GPUs within a node.
+    # Must divide world_size evenly.  Remaining GPUs form data-parallel groups.
+    # Requires n_head and MLP/SwiGLU hidden dims to be divisible by tensor_parallel_size.
+    # Use torchrun with nproc_per_node >= tensor_parallel_size.
+    tensor_parallel_size: int = 1
 
     # Parametrization
     parametrization: ParametrizationConfig = field(default_factory=ParametrizationConfig)

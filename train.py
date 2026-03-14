@@ -39,6 +39,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
@@ -102,19 +103,76 @@ if ddp:
     ddp_world_size = int(os.environ['WORLD_SIZE'])
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
-    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
     seed_offset = ddp_rank # each process gets a different seed
-    # adjust gradient accumulation steps
-    assert config.gradient_accumulation_steps % ddp_world_size == 0
-    config.gradient_accumulation_steps //= ddp_world_size
+
+    tp_size = getattr(config, 'tensor_parallel_size', 1)
+    if tp_size > 1:
+        # ---------------------------------------------------------------
+        # Combined Tensor Parallelism + Data Parallelism setup
+        # Rank layout: rank r → tp_rank = r % tp_size, dp_rank = r // tp_size
+        # TP group for dp_rank k : ranks [k*tp_size, …, k*tp_size+tp_size-1]
+        # DP group for tp_rank j : ranks [j, j+tp_size, j+2*tp_size, …]
+        # ---------------------------------------------------------------
+        assert ddp_world_size % tp_size == 0, (
+            f"world_size ({ddp_world_size}) must be divisible by "
+            f"tensor_parallel_size ({tp_size})"
+        )
+        dp_size = ddp_world_size // tp_size
+        tp_rank = ddp_rank % tp_size
+        dp_rank = ddp_rank // tp_size
+
+        # Build TP process groups (one per data-parallel replica)
+        tp_group = None
+        for dp_r in range(dp_size):
+            ranks = list(range(dp_r * tp_size, dp_r * tp_size + tp_size))
+            grp = dist.new_group(ranks)
+            if dp_rank == dp_r:
+                tp_group = grp
+
+        # Build DP process groups (one per TP rank position)
+        dp_group = None
+        for tp_r in range(tp_size):
+            ranks = [dp_r * tp_size + tp_r for dp_r in range(dp_size)]
+            grp = dist.new_group(ranks)
+            if tp_rank == tp_r:
+                dp_group = grp
+
+        from utils.tensor_parallel import init_tensor_parallel
+        init_tensor_parallel(tp_group)
+
+        # master_process: only rank (dp=0, tp=0) does logging/checkpointing
+        master_process = (dp_rank == 0 and tp_rank == 0)
+        assert config.gradient_accumulation_steps % dp_size == 0, (
+            f"gradient_accumulation_steps must be divisible by dp_size ({dp_size})"
+        )
+        config.gradient_accumulation_steps //= dp_size
+    else:
+        # Pure DDP (no tensor parallelism) — identical to previous behaviour
+        from utils.tensor_parallel import init_tensor_parallel
+        init_tensor_parallel(None)
+        tp_rank = 0
+        tp_size = 1
+        dp_rank = ddp_rank
+        dp_size = ddp_world_size
+        dp_group = None
+        master_process = ddp_rank == 0
+        assert config.gradient_accumulation_steps % ddp_world_size == 0
+        config.gradient_accumulation_steps //= ddp_world_size
 else:
     # vanilla, non-DDP run
+    from utils.tensor_parallel import init_tensor_parallel
+    init_tensor_parallel(None)
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
+    dp_size = 1
+    dp_rank = 0
+    tp_rank = 0
+    tp_size = 1
+    dp_group = None
     device = config.device
 
-tokens_per_iter = config.gradient_accumulation_steps * ddp_world_size * config.batch_size * config.block_size
+tokens_per_iter = config.gradient_accumulation_steps * dp_size * config.batch_size * config.block_size
 if master_process:
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
     os.makedirs(config.out_dir, exist_ok=True)
@@ -135,18 +193,24 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 data_dir = os.path.join('data', config.dataset)
 
+# With tensor parallelism, all ranks in the same TP group process the same batch
+# (they each hold a different weight shard).  Data sharding happens across DP
+# replicas only, so we pass dp_rank / dp_size to the loaders.
+_loader_rank = dp_rank   # same data per TP group
+_loader_world = dp_size  # one data shard per DP replica
+
 # Build infinite data generators (parquet on-the-fly or bin memmap, auto-detected)
 _train_loader = create_dataloader('train', config, device_type, device, data_dir,
-                                  ddp_rank=ddp_rank if ddp else 0,
-                                  ddp_world_size=ddp_world_size)
+                                  ddp_rank=_loader_rank,
+                                  ddp_world_size=_loader_world)
 _val_loaders = {}
 import warnings as _warnings
 for _split in sorted(set(['train'] + config.val_splits)):
     try:
         _val_loaders[_split] = create_dataloader(_split, config, device_type, device,
                                                   data_dir,
-                                                  ddp_rank=ddp_rank if ddp else 0,
-                                                  ddp_world_size=ddp_world_size)
+                                                  ddp_rank=_loader_rank,
+                                                  ddp_world_size=_loader_world)
     except (ValueError, FileNotFoundError) as _e:
         _warnings.warn(f"Skipping data split '{_split}': {_e}")
 
@@ -157,8 +221,8 @@ for _ds_path in config.val_datasets:
     try:
         _extra_val_loaders[_ds_key] = create_dataloader(
             'val', config, device_type, device, _ds_path,
-            ddp_rank=ddp_rank if ddp else 0,
-            ddp_world_size=ddp_world_size,
+            ddp_rank=_loader_rank,
+            ddp_world_size=_loader_world,
         )
         print(f"Loaded extra val dataset: {_ds_key} ({_ds_path})")
     except (ValueError, FileNotFoundError) as _e:
@@ -201,7 +265,9 @@ if config.init_from == 'scratch':
 
 elif config.init_from == 'resume':
     print(f"Resuming training from {config.out_dir}")
-    ckpt_path = os.path.join(config.out_dir, 'ckpt.pt')
+    # When TP is active each rank has its own shard file; fall back to ckpt.pt for tp_size==1
+    tp_suffix = f'_tp{tp_rank}' if tp_size > 1 else ''
+    ckpt_path = os.path.join(config.out_dir, f'ckpt{tp_suffix}.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
 
     # Force architecture params from checkpoint
@@ -283,9 +349,12 @@ if config.compile:
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
-# wrap model into DDP container
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+# wrap model into DDP container (data-parallel dimension only)
+if ddp and dp_size > 1:
+    ddp_kwargs = dict(device_ids=[ddp_local_rank])
+    if tp_size > 1:
+        ddp_kwargs['process_group'] = dp_group  # gradient sync within DP group only
+    model = DDP(model, **ddp_kwargs)
 
 # -----------------------------------------------------------------------------
 # Training Utilities
@@ -298,23 +367,22 @@ def estimate_loss():
     model.eval()
 
     def _reduce(mean_loss, loader):
-        """Weighted all_reduce(SUM)/effective_world — unbiased even when
-        world_size % effective_world != 0 (row groups don't divide evenly).
+        """Weighted all_reduce(SUM)/effective_world across the DP group only.
 
-        Each rank contributes weight = 1/n_sharing, where n_sharing is how many
-        ranks share the same effective row-group slot.  Summing across all ranks
-        gives the unweighted mean over unique row groups.
+        TP ranks within the same TP group already produce identical loss values
+        (activations are replicated after each RowParallelLinear all-reduce), so
+        we only need to average across data-parallel replicas.
 
         Bin loaders (no .effective_world attr) draw independent random batches
-        per rank, so plain AVG is correct — same as effective_world==world_size.
+        per rank → plain AVG is correct (effective_world == dp_size).
         """
-        if not ddp:
+        if not ddp or dp_size <= 1:
             return mean_loss
-        eff_world = getattr(loader, 'effective_world', ddp_world_size)
-        eff_rank  = ddp_rank % eff_world
-        n_sharing = (ddp_world_size // eff_world) + (1 if eff_rank < ddp_world_size % eff_world else 0)
+        eff_world = getattr(loader, 'effective_world', dp_size)
+        eff_rank  = dp_rank % eff_world
+        n_sharing = (dp_size // eff_world) + (1 if eff_rank < dp_size % eff_world else 0)
         t = torch.tensor(mean_loss / n_sharing, device=device)
-        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM, group=dp_group)
         return t.item() / eff_world
 
     # Main dataset splits (train + val_splits within the training dataset)
@@ -326,7 +394,7 @@ def estimate_loss():
             except FileNotFoundError:
                 continue
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         loader = _train_loader if split == 'train' else _val_loaders.get(split)
         key = split[:-4] if split.endswith('.bin') else split
@@ -363,7 +431,9 @@ if config.tensorboard_log and master_process:
 
 # Activation Logging Hooks
 activation_stats = {}
-raw_model = model.module if ddp else model # unwrap DDP container if needed
+# Unwrap DDP (if used) to access the underlying model for checkpointing/logging.
+# DDP is only applied when dp_size > 1; when tp_size > 1 but dp_size == 1 there is no DDP wrapper.
+raw_model = model.module if (ddp and dp_size > 1) else model
 if config.tensorboard_log and master_process:
     def get_activation_hook(name):
         def hook(model, input, output):
@@ -422,27 +492,37 @@ while True:
                 tb_writer.add_scalar(f"val/loss_{k}", v, iter_num)
 
     # 3. Checkpointing (decoupled from eval)
+    # With tensor parallelism each TP rank holds a different weight shard, so
+    # every rank with dp_rank==0 must save its own file:
+    #   tp_size==1: ckpt_NNNNNNN.pt          (same as before)
+    #   tp_size> 1: ckpt_NNNNNNN_tp{r}.pt    (one file per TP rank)
     _ckpt_interval = config.checkpoint_interval if config.checkpoint_interval > 0 else config.eval_interval
-    if iter_num % _ckpt_interval == 0 and master_process and iter_num > 0:
+    _is_ckpt_saver = master_process if tp_size == 1 else (dp_rank == 0)
+    if iter_num % _ckpt_interval == 0 and _is_ckpt_saver and iter_num > 0:
+        tp_suffix = f'_tp{tp_rank}' if tp_size > 1 else ''
         checkpoint = {
             'model': raw_model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'config': config.to_dict(),
             'iter_num': iter_num,
             'best_val_loss': best_val_loss,
+            'tp_rank': tp_rank,
+            'tp_size': tp_size,
         }
-        # Save numbered checkpoint and update ckpt.pt (latest) symlink/copy
-        numbered_ckpt = os.path.join(config.out_dir, f'ckpt_{iter_num:07d}.pt')
-        latest_ckpt   = os.path.join(config.out_dir, 'ckpt.pt')
-        print(f"saving checkpoint to {numbered_ckpt}")
+        # Save numbered checkpoint and update latest symlink/copy
+        numbered_ckpt = os.path.join(config.out_dir, f'ckpt_{iter_num:07d}{tp_suffix}.pt')
+        latest_ckpt   = os.path.join(config.out_dir, f'ckpt{tp_suffix}.pt')
+        if master_process:
+            print(f"saving checkpoint to {numbered_ckpt}")
         torch.save(checkpoint, numbered_ckpt)
-        # Update ckpt.pt as a copy of the latest (keeps 'resume' working)
+        # Update ckpt.pt (or ckpt_tp{r}.pt) as a copy of the latest
         import shutil as _shutil
         _shutil.copy2(numbered_ckpt, latest_ckpt)
         # Rotate: delete old numbered checkpoints beyond keep_last_n_checkpoints
-        if config.keep_last_n_checkpoints > 0:
+        # (only master_process manages file rotation to avoid races)
+        if master_process and config.keep_last_n_checkpoints > 0:
             import glob as _glob
-            _all_ckpts = sorted(_glob.glob(os.path.join(config.out_dir, 'ckpt_???????.pt')))
+            _all_ckpts = sorted(_glob.glob(os.path.join(config.out_dir, f'ckpt_???????{tp_suffix}.pt')))
             for _old in _all_ckpts[:-config.keep_last_n_checkpoints]:
                 os.remove(_old)
                 print(f"removed old checkpoint {os.path.basename(_old)}")
@@ -452,7 +532,8 @@ while True:
 
     # 3. Forward + Backward Pass (with Gradient Accumulation)
     for micro_step in range(config.gradient_accumulation_steps):
-        if ddp:
+        if ddp and dp_size > 1:
+            # Skip gradient all-reduce on all but the last micro-step (DDP optimisation)
             model.require_backward_grad_sync = (micro_step == config.gradient_accumulation_steps - 1)
         with ctx:
             logits, loss, _ = model(X, Y)

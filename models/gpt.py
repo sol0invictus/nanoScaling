@@ -172,17 +172,40 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
+
+        from utils.tensor_parallel import get_tp_world_size, ColumnParallelLinear, RowParallelLinear
+        tp_size = get_tp_world_size()
+
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        
+        self.tp_size = tp_size
+
+        # head_dim is fixed; local heads = n_head // tp_size
+        self.head_dim = config.n_embd // config.n_head
+        self.n_head_local = config.n_head // tp_size   # == n_head when tp_size==1
+
+        if tp_size > 1:
+            assert config.n_head % tp_size == 0, (
+                f"n_head ({config.n_head}) must be divisible by tensor_parallel_size ({tp_size})"
+            )
+            # Use separate Q/K/V projections so each rank handles n_head_local heads
+            # (contiguous head sharding is simpler than interleaved fused-QKV sharding)
+            self.c_attn = None
+            self.q_proj = ColumnParallelLinear(config.n_embd, config.n_embd, bias=config.bias)
+            self.k_proj = ColumnParallelLinear(config.n_embd, config.n_embd, bias=config.bias)
+            self.v_proj = ColumnParallelLinear(config.n_embd, config.n_embd, bias=config.bias)
+            self.c_proj = RowParallelLinear(config.n_embd, config.n_embd, bias=config.bias)
+        else:
+            # Original fused QKV projection (non-TP path, identical to old code)
+            self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+            self.q_proj = self.k_proj = self.v_proj = None
+            self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+
+        # regularization
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+
         self.use_rope = getattr(config, 'use_rope', False)
         if self.use_rope:
              self.rope = RotaryEmbedding(config.n_embd // config.n_head)
@@ -199,10 +222,18 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        if self.tp_size > 1:
+            # Each rank computes Q/K/V for its local head shard
+            q = self.q_proj(x)  # (B, T, n_embd // tp_size)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+        else:
+            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+
+        # n_head_local == n_head when tp_size==1, so this always produces correct shapes
+        k = k.view(B, T, self.n_head_local, self.head_dim).transpose(1, 2) # (B, nh_local, T, hs)
+        q = q.view(B, T, self.n_head_local, self.head_dim).transpose(1, 2) # (B, nh_local, T, hs)
+        v = v.view(B, T, self.n_head_local, self.head_dim).transpose(1, 2) # (B, nh_local, T, hs)
 
         if self.use_rope:
              cos, sin = self.rope(x, position_offset + T)
@@ -244,7 +275,10 @@ class CausalSelfAttention(nn.Module):
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        # re-assemble local head outputs: (B, T, n_head_local * head_dim)
+        # When tp_size==1: n_head_local==n_head so this equals (B, T, C) as before.
+        # When tp_size > 1: (B, T, n_embd // tp_size); RowParallelLinear all-reduces → (B, T, n_embd)
+        y = y.transpose(1, 2).contiguous().view(B, T, self.n_head_local * self.head_dim)
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
@@ -254,45 +288,60 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        from utils.tensor_parallel import get_tp_world_size, ColumnParallelLinear, RowParallelLinear
+        tp_size = get_tp_world_size()
+        hidden = 4 * config.n_embd
+        if tp_size > 1:
+            assert hidden % tp_size == 0, (
+                f"MLP hidden dim ({hidden}) must be divisible by tensor_parallel_size ({tp_size})"
+            )
+            self.c_fc   = ColumnParallelLinear(config.n_embd, hidden, bias=config.bias)
+            self.c_proj = RowParallelLinear(hidden, config.n_embd, bias=config.bias)
+        else:
+            self.c_fc   = nn.Linear(config.n_embd, hidden, bias=config.bias)
+            self.c_proj = nn.Linear(hidden, config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.c_fc(x)
+        x = self.c_fc(x)    # (B, T, hidden // tp_size) or (B, T, hidden)
         x = self.gelu(x)
-        x = self.c_proj(x)
+        x = self.c_proj(x)  # all-reduce inside RowParallel → (B, T, n_embd)
         x = self.dropout(x)
         return x
 
 class SwiGLUMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # SwiGLU: (xW + b) * SiLU(xV + c) -> output
-        # Usually implemented as a single layer expanding to 2 * hidden_dim
-        # Hidden dim is usually 4 * n_embd or (8/3) * n_embd for parameter efficiency parity
-        # LLaMA uses 2/3 * 4 * d = 8/3 d. We will use config logic if present, or default 4*
-        
-        # Calculate hidden dimension
+        # SwiGLU: SiLU(xW1) * (xW2) -> xW3
+        # LLaMA-style hidden dim: (8/3) * n_embd, rounded to multiple_of
         hidden_dim = 4 * config.n_embd
         hidden_dim = int(2 * hidden_dim / 3)
-        # Round to multiple_of
         if hasattr(config, 'multiple_of'):
-             hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
+            hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
 
-        self.w1 = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
-        self.w2 = nn.Linear(config.n_embd, hidden_dim, bias=config.bias) # Gate
-        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
+        from utils.tensor_parallel import get_tp_world_size, ColumnParallelLinear, RowParallelLinear
+        tp_size = get_tp_world_size()
+        if tp_size > 1:
+            assert hidden_dim % tp_size == 0, (
+                f"SwiGLU hidden dim ({hidden_dim}) must be divisible by tensor_parallel_size ({tp_size})"
+            )
+            # Both gate projections are column-parallel; output is row-parallel
+            self.w1 = ColumnParallelLinear(config.n_embd, hidden_dim, bias=config.bias)
+            self.w2 = ColumnParallelLinear(config.n_embd, hidden_dim, bias=config.bias)
+            self.c_proj = RowParallelLinear(hidden_dim, config.n_embd, bias=config.bias)
+        else:
+            self.w1 = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+            self.w2 = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+            self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         # x: (B, T, C)
-        x1 = self.w1(x)
-        x2 = self.w2(x)
-        # silu(x2) * x1
-        hidden = F.silu(x1) * x2
-        return self.dropout(self.c_proj(hidden))
+        x1 = self.w1(x)           # (B, T, hidden // tp_size) — local gate 1
+        x2 = self.w2(x)           # (B, T, hidden // tp_size) — local gate 2
+        hidden = F.silu(x1) * x2  # element-wise; stays local
+        return self.dropout(self.c_proj(hidden))  # all-reduce → (B, T, n_embd)
 
 class Block(nn.Module):
 
