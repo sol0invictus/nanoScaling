@@ -1,0 +1,72 @@
+# RQ1 Scale-up: 370M AdamW + Pre-RMSNorm
+# Main workhorse scale per research plan (§4.1). Architecture matches GPT-3 Medium.
+# ~10B tokens training duration (~10K steps at ~1M tokens/step) — Chinchilla optimal.
+# NOTE: batch_size may need tuning to fit GPU memory at this scale.
+
+out_dir: out/rq1/370m_adamw
+tensorboard_run_name: rq1_370m_adamw
+tensorboard_log: true
+
+eval_interval: 500
+log_interval: 10
+metrics_log_interval: 200
+eval_iters: 5
+eval_only: false
+checkpoint_interval: 2000
+always_save_checkpoint: true
+keep_last_n_checkpoints: 3
+init_from: "scratch"
+
+# Data
+dataset: "/home/nanoScaling/training_data/openwebtext"
+
+val_datasets:
+  - /home/nanoScaling/val/code_val
+  - /home/nanoScaling/val/math_val
+  - /home/nanoScaling/val/wikitext_val
+
+# ~1M tokens/step: 16 * 32 * 2048 = 1,048,576 — adjust batch_size/grad_accum for memory
+gradient_accumulation_steps: 32
+batch_size: 16
+block_size: 2048
+
+# Model Architecture — 370M (GPT-3 Medium)
+n_layer: 24
+n_head: 16
+n_embd: 1024
+bias: false
+dropout: 0.0
+
+# Architecture Toggles
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+
+norm_position: pre
+norm_affine: true
+
+# Optimizer: AdamW
+optimizer: adamw
+learning_rate: 3e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+# LR Scheduler
+decay_lr: true
+warmup_iters: 1000
+lr_decay_iters: 10000
+min_lr: 6e-5
+
+max_iters: 10000
+
+# System
+device: "cuda"
+dtype: "bfloat16"
+compile: true
+backend: "nccl"
+
+# Parametrization
+parametrization:
+  mode: "SP"

@@ -1,0 +1,75 @@
+# RQ1 Ablation: Muon + decoupled weight decay = 0.1 (matching AdamW's WD on 2D params)
+# Isolates whether spectral geometry differences between Muon and AdamW are driven by
+# the optimizer's update rule or by the presence/absence of L2 regularization.
+# Identical to 125m_muon.yaml except muon_weight_decay=0.1.
+
+out_dir: out/rq1/125m_muon_wd01
+tensorboard_run_name: rq1_125m_muon_wd01
+tensorboard_log: true
+
+eval_interval: 50
+log_interval: 10
+metrics_log_interval: 50
+eval_iters: 5
+eval_only: false
+checkpoint_interval: 100
+always_save_checkpoint: true
+keep_last_n_checkpoints: 3
+init_from: "scratch"
+
+# Data
+dataset: "/home/nanoScaling/training_data/openwebtext"
+
+val_datasets:
+  - /home/nanoScaling/val/code_val
+  - /home/nanoScaling/val/math_val
+  - /home/nanoScaling/val/wikitext_val
+
+gradient_accumulation_steps: 40
+batch_size: 12
+block_size: 1024
+
+# Model Architecture
+n_layer: 12
+n_head: 12
+n_embd: 768
+bias: false
+dropout: 0.0
+
+# Architecture Toggles
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+
+norm_position: pre
+norm_affine: true
+
+# Optimizer: Muon + weight decay
+optimizer: muon
+muon_lr: 0.02
+muon_momentum: 0.95
+muon_ns_steps: 5
+muon_weight_decay: 0.1   # ← ablation: decoupled WD on 2D params (default=0.0)
+learning_rate: 3e-4      # AdamW LR for 1D params (embeddings, norms, biases)
+weight_decay: 0.1        # AdamW WD for 1D params (unchanged)
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+# LR Scheduler
+decay_lr: true
+warmup_iters: 2000
+lr_decay_iters: 40000
+min_lr: 6e-5
+
+max_iters: 40000
+
+# System
+device: "cuda"
+dtype: "bfloat16"
+compile: true
+backend: "nccl"
+
+# Parametrization
+parametrization:
+  mode: "SP"
