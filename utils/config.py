@@ -65,6 +65,9 @@ class ExperimentConfig:
     moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
     moe_block_size: int = 128    # Triton tile size for block-sparse kernels
 
+    # Flash Attention 3 (requires: pip install flash-attn>=3.0, H100/Hopper GPU recommended)
+    use_flash_attn3: bool = False
+
     # Hybrid (Gated Delta Net interleaved with standard attention)
     # Requires: pip install flash-linear-attention
     use_hybrid: bool = False

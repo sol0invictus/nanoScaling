@@ -20,6 +20,7 @@ dropout: 0.0
 use_rmsnorm: false
 use_rope: true
 use_swiglu: true
+use_flash_attn3: false  # set true on H100 Hopper GPUs (requires: pip install flash-attn>=3.0)
 
 norm_position: post   # ← Post-LN
 norm_affine: true

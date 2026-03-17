@@ -15,6 +15,17 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+# Flash Attention 3 (flash-attn >= 3.0, optimized for H100 Hopper GPUs)
+try:
+    from flash_attn import flash_attn_func as _flash_attn_func
+    import flash_attn as _flash_attn_mod
+    _FLASH_ATTN_AVAILABLE = True
+    _FLASH_ATTN_VERSION = int(_flash_attn_mod.__version__.split('.')[0])
+except ImportError:
+    _flash_attn_func = None
+    _FLASH_ATTN_AVAILABLE = False
+    _FLASH_ATTN_VERSION = 0
+
 # from models.moe import MoELayer
 # temporary issue with MoE Layer
 MoELayer = None
@@ -187,9 +198,20 @@ class CausalSelfAttention(nn.Module):
         if self.use_rope:
              self.rope = RotaryEmbedding(config.n_embd // config.n_head)
 
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        # Flash Attention 3: uses flash-attn package (>=3.0), best on H100 Hopper GPUs.
+        # Falls back to PyTorch SDPA when kv_cache is active (inference) or package unavailable.
+        self.use_flash_attn3 = getattr(config, 'use_flash_attn3', False)
+        if self.use_flash_attn3 and not _FLASH_ATTN_AVAILABLE:
+            print("WARNING: use_flash_attn3=True but flash-attn package not found. "
+                  "Install with: pip install flash-attn>=3.0  Falling back to PyTorch SDPA.")
+            self.use_flash_attn3 = False
+        if self.use_flash_attn3 and _FLASH_ATTN_VERSION < 3:
+            print(f"WARNING: use_flash_attn3=True but flash-attn version is {_FLASH_ATTN_VERSION}.x "
+                  f"(need >=3.0 for H100 Hopper kernels). Proceeding with available version.")
+
+        # PyTorch built-in SDPA (Flash Attention 2 path, requires PyTorch >= 2.0)
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
+        if not self.flash and not self.use_flash_attn3:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
@@ -219,8 +241,22 @@ class CausalSelfAttention(nn.Module):
             v = torch.cat([past_v, v], dim=2)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
+        if self.use_flash_attn3 and kv_cache is None:
+            # Flash Attention 3: optimised CUDA kernels for H100 Hopper GPUs.
+            # flash_attn_func expects (B, T, nh, hs); current layout is (B, nh, T, hs).
+            # KV-cache inference falls through to PyTorch SDPA below.
+            q_fa = q.transpose(1, 2).contiguous()  # (B, T, nh, hs)
+            k_fa = k.transpose(1, 2).contiguous()
+            v_fa = v.transpose(1, 2).contiguous()
+            is_causal = attn_mask is None
+            y = _flash_attn_func(
+                q_fa, k_fa, v_fa,
+                dropout_p=self.dropout if self.training else 0.0,
+                causal=is_causal,
+            )
+            y = y.transpose(1, 2)  # back to (B, nh, T, hs)
+        elif self.flash:
+            # PyTorch built-in SDPA (Flash Attention 2 via torch.backends.cuda.sdp_kernel)
             # With KV cache, we must not use is_causal=True since q and k have different lengths.
             # For cached decoding (T_q=1), no causal mask is needed since we only attend to past.
             if kv_cache is not None:
@@ -382,6 +418,8 @@ class GPTConfig:
     router_z_loss_weight: float = 0.001
     moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
     moe_block_size: int = 128    # Triton tile size for block-sparse kernels
+    # Flash Attention 3 (requires: pip install flash-attn>=3.0, H100/Hopper GPU recommended)
+    use_flash_attn3: bool = False
     # Hybrid (Gated Delta Net interleaved with standard attention)
     # Requires: pip install flash-linear-attention
     use_hybrid: bool = False
