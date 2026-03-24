@@ -6,13 +6,13 @@ out_dir: out/rq2/125m_muon_no_norm_scaled_init
 tensorboard_run_name: rq2_125m_muon_no_norm_scaled_init
 tensorboard_log: true
 
-dataset: shakespeare_char
-# dataset: openwebtext
+dataset: openwebtext
+# dataset: shakespeare_char  # for quick smoke tests
 
 n_layer: 12
 n_head: 12
 n_embd: 768
-block_size: 1024
+block_size: 2048
 bias: false
 dropout: 0.0
 
@@ -29,6 +29,7 @@ optimizer: muon
 muon_lr: 0.02
 muon_momentum: 0.95
 muon_ns_steps: 5
+muon_weight_decay: 0.1
 learning_rate: 3e-4
 weight_decay: 0.1
 beta1: 0.9
@@ -36,19 +37,20 @@ beta2: 0.95
 grad_clip: 1.0
 
 decay_lr: true
-warmup_iters: 400
-lr_decay_iters: 20000
+warmup_iters: 200
+lr_decay_iters: 5000
 min_lr: 3e-5
 
-batch_size: 12
-gradient_accumulation_steps: 40
-max_iters: 20000
+batch_size: 32
+gradient_accumulation_steps: 16
+max_iters: 5000
 
-eval_interval: 500
+eval_interval: 250
 log_interval: 10
 metrics_log_interval: 50   # TensorBoard/CSV logging frequency (0 = same as log_interval)
 eval_iters: 100
 always_save_checkpoint: true
+checkpoint_interval: 2000
 
 device: cuda
 dtype: bfloat16

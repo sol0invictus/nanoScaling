@@ -17,3 +17,4 @@ research_plan/
 *.parquet
 val/
 training_data/
+experiments/rq1_spectral_geometry/analysis/

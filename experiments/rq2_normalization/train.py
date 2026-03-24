@@ -57,6 +57,7 @@ topk_svd_freq = 500
 activation_freq = 100
 sharpness_freq = 5000
 svd_checkpoint_freq = 2000
+topk = 32
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -76,7 +77,7 @@ for arg in sys.argv[1:]:
         assert arg.startswith('--'), f"Unknown argument: {arg}"
         key, val = arg[2:].split('=', 1)
         for exp_var in ['spectral_freq', 'grad_freq', 'topk_svd_freq',
-                        'activation_freq', 'sharpness_freq', 'svd_checkpoint_freq']:
+                        'activation_freq', 'sharpness_freq', 'svd_checkpoint_freq', 'topk']:
             if key == exp_var:
                 globals()[exp_var] = int(val)
                 print(f"Experiment param: {key} = {val}")
@@ -258,6 +259,7 @@ if master_process:
         out_dir=config.out_dir,
         csv_dir=os.path.join(config.out_dir, 'logs'),
         sharpness_freq=sharpness_freq,
+        topk=topk,
         stability_monitor=stability_monitor,
     )
 
@@ -292,7 +294,7 @@ def estimate_loss():
             except FileNotFoundError:
                 continue
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         loader = _train_loader if split == 'train' else _val_loaders.get(split)
         key = split[:-4] if split.endswith('.bin') else split
@@ -302,7 +304,7 @@ def estimate_loss():
         for k in range(config.eval_iters):
             X, Y = next(loader)
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[ds_name] = _reduce(losses.mean().item(), loader)
     model.train()
@@ -375,6 +377,15 @@ while True:
             if spectral_logger and iter_num % svd_checkpoint_freq == 0 and iter_num > 0:
                 spectral_logger.log_checkpoint(iter_num)
 
+            # --- CSV: val loss row ---
+            if spectral_logger and spectral_logger.csv:
+                spectral_logger.csv.write('training', {
+                    'step': iter_num,
+                    'train_loss': '',
+                    'val_loss': current_val_loss.item() if hasattr(current_val_loss, 'item') else current_val_loss,
+                    'lr_muon': '', 'lr_adamw': '', 'mfu': '', 'tokens_seen': '',
+                })
+
         # Early stop — all ranks check and break together
         if not math.isfinite(current_val_loss):
             if master_process:
@@ -435,6 +446,10 @@ while True:
     t0 = t1
     tokens_seen += tokens_per_iter
 
+    lossf_full = lossf  # already computed above
+    lr_adamw = optimizer.param_groups[-1]['lr']
+    lr_muon  = optimizer.param_groups[0]['lr']
+
     if iter_num % config.log_interval == 0 and master_process:
         if local_iter_num >= 5:
             mfu = raw_model.estimate_mfu(
@@ -445,13 +460,27 @@ while True:
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, "
               f"mfu {running_mfu*100:.2f}%, tokens {tokens_seen:,}")
 
-    # --- TensorBoard: train metrics ---
-    if iter_num % _metrics_interval == 0 and master_process and tb_writer:
-        tb_writer.add_scalar('train/loss', lossf, iter_num)
-        tb_writer.add_scalar('train/lr_adamw',
-                             optimizer.param_groups[-1]['lr'], iter_num)
-        tb_writer.add_scalar('train/tokens_seen', tokens_seen, iter_num)
-        tb_writer.flush()
+    if iter_num % _metrics_interval == 0 and master_process:
+        # --- TensorBoard: train metrics ---
+        if tb_writer:
+            tb_writer.add_scalar('train/loss', lossf, iter_num)
+            tb_writer.add_scalar('train/lr/muon', lr_muon, iter_num)
+            tb_writer.add_scalar('train/lr/adamw', lr_adamw, iter_num)
+            tb_writer.add_scalar('train/mfu', running_mfu * 100, iter_num)
+            tb_writer.add_scalar('train/tokens_seen', tokens_seen, iter_num)
+            tb_writer.flush()
+
+        # --- CSV: train loss row ---
+        if spectral_logger and spectral_logger.csv:
+            spectral_logger.csv.write('training', {
+                'step': iter_num,
+                'train_loss': lossf,
+                'val_loss': '',
+                'lr_muon': lr_muon,
+                'lr_adamw': lr_adamw,
+                'mfu': running_mfu,
+                'tokens_seen': tokens_seen,
+            })
 
     iter_num += 1
     local_iter_num += 1
