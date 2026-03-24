@@ -273,6 +273,9 @@ scaler = torch.amp.GradScaler(device='cuda', enabled=(config.dtype == 'float16')
 # to allow for fine-grained control (e.g. different optimizers for different layers)
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
 
+# Store initial LR per param group so CombinedOptimizer (Muon+AdamW) decays proportionally
+initial_lrs = [pg['lr'] for pg in optimizer.param_groups]
+
 if config.init_from == 'resume' and 'optimizer' in checkpoint:
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
@@ -326,7 +329,7 @@ def estimate_loss():
             except FileNotFoundError:
                 continue
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         loader = _train_loader if split == 'train' else _val_loaders.get(split)
         key = split[:-4] if split.endswith('.bin') else split
@@ -338,23 +341,36 @@ def estimate_loss():
         for k in range(config.eval_iters):
             X, Y = next(loader)
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[ds_name] = _reduce(losses.mean().item(), loader)
 
     model.train()
     return out
 
-def get_lr(it):
-    """ Learning rate decay scheduler (cosine with warmup) """
+def get_lr_multiplier(it: int) -> float:
+    """Cosine decay multiplier in [min_lr/learning_rate, 1.0] with linear warmup."""
+    min_ratio = config.min_lr / config.learning_rate
     if it < config.warmup_iters:
-        return config.learning_rate * (it + 1) / (config.warmup_iters + 1)
+        return (it + 1) / (config.warmup_iters + 1)
     if it > config.lr_decay_iters:
-        return config.min_lr
+        return min_ratio
     decay_ratio = (it - config.warmup_iters) / (config.lr_decay_iters - config.warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return config.min_lr + coeff * (config.learning_rate - config.min_lr)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_ratio + coeff * (1.0 - min_ratio)
+
+
+def apply_lr(it: int):
+    """Apply cosine decay to each param group using its own initial LR.
+
+    This ensures CombinedOptimizer (Muon + AdamW) groups decay proportionally
+    rather than converging to the same absolute value.
+    """
+    if not config.decay_lr:
+        return
+    mult = get_lr_multiplier(it)
+    for pg, init_lr in zip(optimizer.param_groups, initial_lrs):
+        pg['lr'] = init_lr * mult
 
 # Tensorboard Logging
 if config.tensorboard_log and master_process:
@@ -393,9 +409,8 @@ _metrics_interval = config.metrics_log_interval if config.metrics_log_interval >
 while True:
 
     # 1. Update Learning Rate
-    lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+    apply_lr(iter_num)
+    lr = optimizer.param_groups[0]['lr']  # for logging
 
     # 2. Evaluation — all ranks participate so all_reduce in estimate_loss works.
     if iter_num % config.eval_interval == 0:

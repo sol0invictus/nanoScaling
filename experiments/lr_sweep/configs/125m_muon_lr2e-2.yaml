@@ -1,0 +1,62 @@
+# LR sweep: Muon muon_lr=2e-2 (current default — serves as reference point)
+# Architecture: 125M, Pre-RMSNorm baseline (same as RQ2 conditions)
+# AdamW lr for 1D params (embeddings, norms, biases) held fixed at 3e-4
+
+out_dir: out/lr_sweep/125m_muon_lr2e-2
+tensorboard_run_name: lr_sweep_125m_muon_lr2e-2
+tensorboard_log: true
+
+dataset: "/home/nanoScaling/training_data/openwebtext" # 'shakespeare', 'openwebtext'
+
+# Validation dataset folders evaluated at each eval_interval.
+# Each entry is a path to a dataset folder (parquet or bin, auto-detected).
+# The folder basename is used as the key in TensorBoard (val/loss_<name>).
+val_datasets:
+  - /home/nanoScaling/val/code_val
+  - /home/nanoScaling/val/math_val
+  - /home/nanoScaling/val/wikitext_val
+
+n_layer: 12
+n_head: 12
+n_embd: 768
+block_size: 2048
+bias: false
+dropout: 0.0
+
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+use_flash_attn3: false
+
+norm_position: pre
+norm_affine: true
+norm_free_scaled_init: false
+
+optimizer: muon
+muon_lr: 2e-2
+muon_momentum: 0.95
+muon_ns_steps: 5
+muon_weight_decay: 0.1
+learning_rate: 3e-4   # AdamW lr for 1D params — held fixed across all Muon sweep runs
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+
+decay_lr: true
+warmup_iters: 200
+lr_decay_iters: 2000
+min_lr: 3e-5
+
+batch_size: 32
+gradient_accumulation_steps: 16
+max_iters: 2000
+
+eval_interval: 200
+log_interval: 10
+eval_iters: 10
+always_save_checkpoint: false
+
+device: cuda
+dtype: bfloat16
+compile: false
