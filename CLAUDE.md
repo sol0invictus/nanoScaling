@@ -13,8 +13,7 @@ See [research_plan/muon_research_proposal.md](research_plan/muon_research_propos
 ```bash
 pip install torch numpy transformers datasets tiktoken wandb tqdm matplotlib pandas seaborn pyyaml pyarrow requests
 
-# Optional — required for MoE training (configs/moe.yaml):
-pip install megablocks einops
+# MoE training (configs/moe.yaml) — no extra dependencies needed (pure PyTorch)
 
 # Optional — required for Hybrid Gated-Delta-Net (configs/hybrid_gated_delta_net.yaml):
 pip install flash-linear-attention
@@ -40,10 +39,19 @@ python train.py --optimizer=scion --learning_rate=0.001 --scion_norm=Spectral
 # Multi-GPU DDP
 torchrun --standalone --nproc_per_node=4 train.py configs/train_full.yaml
 
-# Supervised fine-tuning
-python train_sft.py configs/sft.yaml
+# SFT data preparation (downloads from HuggingFace, packs into .bin blocks)
+python data/prepare_sft.py --datasets alpaca                  # ~52k examples, fast
+python data/prepare_sft.py --datasets alpaca ultrachat        # recommended default
+python data/prepare_sft.py --datasets alpaca --max_samples 5000  # quick smoke test
 
-# Mixture of Experts training (requires: pip install megablocks einops)
+# Supervised fine-tuning (from scratch or from a pretrained checkpoint)
+python train_sft.py configs/sft.yaml
+python train_sft.py configs/sft.yaml --init_from=out/ckpt.pt  # fine-tune from PT ckpt
+
+# Multi-GPU SFT
+torchrun --standalone --nproc_per_node=4 train_sft.py configs/sft.yaml
+
+# Mixture of Experts training (pure PyTorch, no extra deps)
 python train.py configs/moe.yaml
 
 # Hybrid Gated-Delta-Net + Attention (requires: pip install flash-linear-attention)
@@ -140,7 +148,12 @@ runner.run_grid(
 )
 ```
 
-There is no formal test suite or linter configured.
+### Tests
+
+```bash
+# SFT correctness suite (6 tests: tokenisation, packing, mask shift, attn mask, loss, round-trip)
+python tests/test_sft.py
+```
 
 **Gitignored data and artifacts**: `.bin`, `.parquet`, `.pt`, `.pkl`, `*.pyc`, `out/`, `experiments_out/`, `wandb/`, `val/`, `research_plan/` are all excluded from version control. Run the relevant `data/*/prepare.py` scripts to regenerate data locally.
 
@@ -169,6 +182,7 @@ Key fields added for research experiments:
 - `moe_hidden_dim` – MoE expert hidden dim (0 = default 4×n_embd)
 - `moe_block_size` – Triton tile size for block-sparse MoE kernels (default 128)
 - `load_balance_loss_weight` / `router_z_loss_weight` – MoE auxiliary loss coefficients (default 0.01 / 0.001)
+- `use_wandb` / `wandb_project` / `wandb_run_name` – WandB logging (opt-in, used by `train_sft.py`)
 
 ### Model (`models/gpt.py`)
 
@@ -176,7 +190,7 @@ Decoder-only Transformer with toggleable modern components:
 - `use_rmsnorm` – RMSNorm instead of LayerNorm
 - `use_rope` – Rotary positional embeddings (RoPE) instead of absolute PE
 - `use_swiglu` – SwiGLU FFN (8/3·d scaling) instead of GELU MLP; hidden dim rounded to `multiple_of`
-- `use_moe` – Switch Transformer-style Mixture of Experts with auxiliary load-balancing and router-z losses (currently disabled via import guard — `MoELayer = None` — due to a temporary issue)
+- `use_moe` – Switch Transformer-style Mixture of Experts with auxiliary load-balancing and router-z losses; pure-PyTorch implementation in `models/moe.py` (no megablocks required)
 - `use_hybrid` – Interleave `GatedDeltaNetLayer` (linear attention, O(T) memory) with standard causal attention every `delta_net_every` layers. Requires `pip install flash-linear-attention`. See `models/gated_delta_net.py` and `configs/hybrid_gated_delta_net.yaml`.
 
 Normalization variants (controlled by `norm_position` and `norm_affine`):
@@ -220,7 +234,7 @@ All metrics fire together every time `log_step()` is called — there are no sep
 ### Training Scripts
 
 - **`train.py`** – Main pretraining loop. Supports DDP, mixed precision, `torch.compile`, gradient accumulation, cosine LR schedule with warmup. Emits `metrics.json` at the end of each run.
-- **`train_sft.py`** – SFT variant with packed sequences, masked attention, and instruction masking.
+- **`train_sft.py`** – SFT loop. Packed conversations with block-diagonal causal attention (doc_ids), instruction masking (loss only on assistant tokens), block-aligned batch sampling, AdamW/Muon/Scion optimizers, TensorBoard + optional WandB, decoupled checkpointing. See SFT section below.
 - **`experiments/rq1_spectral_geometry/train.py`** – Adds `SpectralLogger` + CSV logging to the standard loop; correct per-optimizer LR decay for CombinedOptimizer. Spectral/grad/activation metrics logged at `log_interval` cadence alongside train loss.
 - **`experiments/rq2_normalization/train.py`** – Same as RQ1, plus `StabilityMonitor`, NaN early-stopping, and stability verdict in `metrics.json`.
 
@@ -255,6 +269,45 @@ Two data paths, selected automatically via `data_format` config:
 - `data/fineweb_edu/download.py` — downloads pre-built parquet shards from `karpathy/fineweb-edu-100b-shuffle` (1823 shards, ~180 GB total)
 - `data/fineweb_edu/prepare.py` — streams `HuggingFaceFW/fineweb-edu` and saves raw text to parquet shards (no tokenization); output format: `shard_00000.parquet`, ..., zstd-compressed, 1024 docs/row-group
 
+### SFT Pipeline (`data/prepare_sft.py`, `train_sft.py`)
+
+**Data preparation** (`data/prepare_sft.py`) — consolidated script that downloads, formats, packs, and writes all SFT data:
+
+Supported datasets (all public, no auth required):
+
+| Name | Flag | Source | Size |
+|---|---|---|---|
+| Alpaca | `alpaca` | `tatsu-lab/alpaca` | 52k single-turn |
+| UltraChat | `ultrachat` | `HuggingFaceH4/ultrachat_200k` | 207k multi-turn |
+| OASST1 | `oasst1` | `OpenAssistant/oasst1` | multilingual, EN-filtered |
+| OpenHermes | `openhermes` | `teknium/OpenHermes-2.5` | 1M mixed-source |
+
+Chat format (GPT-2 tokenizer, no special tokens added):
+```
+<|endoftext|>User: {turn1_user}\nAssistant: {turn1_response}\nUser: {turn2_user}\nAssistant: {turn2_response}<|endoftext|>
+```
+Loss mask = 1 for assistant content tokens and the final EOT; 0 for everything else (BOS, user turns, "Assistant: " prefix, padding).
+
+Packing: conversations are shuffled and packed sequentially into blocks of `block_size`. Each block begins with a BOS (EOT_ID=50256) token, so block-aligned sampling in `get_batch` always starts at a conversation boundary. `doc_ids` increment per conversation within a block for block-diagonal attention.
+
+Output files (default: `data/sft/`):
+- `{split}.bin` — uint16 tokens, flattened (N_blocks × block_size)
+- `{split}_mask.bin` — uint8 loss mask, same shape
+- `{split}_doc_ids.bin` — uint32 conversation ids, same shape
+
+**Training loop** (`train_sft.py`) key design points:
+
+- **Block-aligned sampling**: `get_batch` samples at `block_idx * block_size` offsets, so every sequence starts with BOS and never mid-conversation.
+- **Mask shift**: The loss mask is applied as `y[t] = -1 when mask[t+1] == 0`. This is the correct shift — `y[t] = x[t+1]` is the target, and `mask[t+1]` says whether token `x[t+1]` should be predicted. Applying `mask[t]` instead would be off by one (loses the first assistant token, trains on wrong tokens).
+- **Block-diagonal attention**: `make_attn_mask(doc_ids)` builds a `(B, 1, T, T)` bool mask — tokens attend only within their own conversation, causally. Passed as `attn_mask` to `model.forward()`.
+- **Optimizer**: dispatched through `model.configure_optimizers()` — same as `train.py`. Supports AdamW, Muon (2D weights), and Scion. `CombinedOptimizer` param groups decay proportionally via per-group initial LR multipliers.
+- **`raw_model`**: assigned after both `torch.compile` and DDP are applied (`raw_model = model.module` for DDP, else the compiled/plain model). Avoids the crash from accessing `.module` on `OptimizedModule` before DDP wrapping.
+- **WandB**: opt-in via `use_wandb: True` in config (fields: `wandb_project`, `wandb_run_name`).
+
+Config: `configs/sft.yaml`. Set `init_from` to a checkpoint path for fine-tuning, or `"scratch"` for testing.
+
+**Test suite** (`tests/test_sft.py`): 6 tests covering tokenisation alignment, packing correctness, mask shift verification, block-diagonal attention structure, forward-pass loss isolation, and full binary round-trip. Run with `python tests/test_sft.py`.
+
 ### Parametrization (`utils/parametrization.py`)
 
 Applies initialization scaling and per-parameter LR multipliers based on `ParametrizationConfig.mode` (`SP`, `MuP`, `CompleteP`). Enables HP transfer across model widths.
@@ -278,6 +331,9 @@ Applies initialization scaling and per-parameter LR multipliers based on `Parame
 - **SVD checkpoints**: Full singular value spectra are written as `svd_step_NNNNNNN.json` in `out_dir` at each major checkpoint for offline analysis.
 - **FineWeb-Edu dataset**: Two preparation paths: `download.py` fetches pre-built parquet shards from `karpathy/fineweb-edu-100b-shuffle`; `prepare.py` streams `HuggingFaceFW/fineweb-edu` and saves raw text as parquet. Both produce `shard_?????.parquet` files consumed by `utils/dataloader.py` with on-the-fly GPT-2 tokenization. The old pre-tokenized `.bin` workflow is removed for FineWeb-Edu.
 - **Data format auto-detection**: `create_dataloader()` in `utils/data.py` checks for `shard_?????.parquet` files and routes to the parquet path automatically. OpenWebText now uses parquet (run `data/openwebtext/prepare.py`). Shakespeare still uses the `.bin` memmap path. Force a specific path with `data_format: 'bin'` or `data_format: 'parquet'` in config.
-- **MoE auxiliary loss**: Two coefficients: `load_balance_loss_weight` (default 0.01) and `router_z_loss_weight` (default 0.001); both are added directly to the main cross-entropy loss. Note: MoE is currently disabled in `models/gpt.py` via an import guard (`MoELayer = None`) due to a temporary issue.
+- **MoE auxiliary loss**: Two coefficients: `load_balance_loss_weight` (default 0.01) and `router_z_loss_weight` (default 0.001); both are added directly to the main cross-entropy loss. `models/moe.py` is a pure-PyTorch implementation using token permutation dispatch (no megablocks / stk required); `einops` dependency is also removed.
 - **Multi-dataset validation**: `val_splits` lists split names within the training dataset; `val_datasets` lists paths to separate dataset folders (parquet or bin). Both are evaluated every `eval_interval` and logged to TensorBoard under `val/<split>` tags.
 - **Hybrid model**: `use_hybrid=True` replaces every `delta_net_every`-th layer (starting at 0) with `GatedDeltaNetLayer` from `models/gated_delta_net.py`. Requires `flash-linear-attention`. Config: `configs/hybrid_gated_delta_net.yaml`.
+- **SFT loss masking**: The mask stored in `{split}_mask.bin` marks tokens that *are* assistant tokens (mask=1). In `get_batch`, this is applied with a +1 shift: `y[t]` (which equals `x[t+1]`) is kept when `mask[t+1]=1`. Using `mask[t]` directly would be off by one — it would skip the first assistant token and include one spurious non-assistant target.
+- **SFT block-diagonal attention**: `doc_ids` are assigned per conversation during packing and stored in `{split}_doc_ids.bin`. At training time `make_attn_mask(doc_ids)` produces a `(B,1,T,T)` bool mask preventing cross-conversation attention within a packed sequence. This is passed as `attn_mask` to `model.forward()` and used by `scaled_dot_product_attention`.
+- **SFT `raw_model` assignment**: must be done after both `torch.compile` and DDP wrapping. `torch.compile` returns `OptimizedModule` which has no `.module` attribute, so accessing `model.module` before DDP is applied crashes. Correct order: compile → DDP → `raw_model = model.module`.

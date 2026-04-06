@@ -107,6 +107,11 @@ class ExperimentConfig:
     lr_decay_iters: int = 600000
     min_lr: float = 6e-5
 
+    # WandB logging
+    use_wandb: bool = False
+    wandb_project: str = 'nanoscaling-sft'
+    wandb_run_name: str = 'sft'
+
     # System
     device: str = 'cuda'
     dtype: str = 'bfloat16'
