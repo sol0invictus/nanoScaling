@@ -125,13 +125,33 @@ python data/shakespeare/prepare_parquet.py
 python tools/produce_val_sets.py
 ```
 
+### Evaluation
+
+```bash
+# Step 1: Pre-download all eval data (run once before first eval)
+python data/prepare_eval.py               # all tasks + BPB corpora
+python data/prepare_eval.py --skip_bpb    # HF tasks only (faster)
+python data/prepare_eval.py --tasks mmlu arc hellaswag gsm8k  # specific tasks
+
+# Step 2: Run benchmarks against a checkpoint
+python eval_sft.py out-sft/ckpt_sft.pt
+
+# Select specific tasks
+python eval_sft.py out-sft/ckpt_sft.pt --tasks mmlu arc_easy arc_challenge hellaswag gsm8k bpb
+
+# Quick run: 200 samples per task, 50 BPB batches
+python eval_sft.py out-sft/ckpt_sft.pt --tasks all --max_samples 200 --max_batches 50
+
+# Save results to JSON
+python eval_sft.py out-sft/ckpt_sft.pt --out results.json
+```
+
 ### Other Scripts
 
 ```bash
 python sample.py         # Generate text from a trained checkpoint
 python bench.py          # Benchmark throughput
 python experiments.py    # Run grid searches / scaling studies
-python eval_sft.py       # Evaluate SFT models
 python debug_yaml.py     # Debug YAML config loading
 ```
 
@@ -307,6 +327,27 @@ Output files (default: `data/sft/`):
 Config: `configs/sft.yaml`. Set `init_from` to a checkpoint path for fine-tuning, or `"scratch"` for testing.
 
 **Test suite** (`tests/test_sft.py`): 6 tests covering tokenisation alignment, packing correctness, mask shift verification, block-diagonal attention structure, forward-pass loss isolation, and full binary round-trip. Run with `python tests/test_sft.py`.
+
+### Eval Suite (`evals/`, `eval_sft.py`)
+
+Mirrors the nanochat ChatCORE benchmark. All tasks download from HuggingFace automatically on first run.
+
+| Task | File | Method | Metric | Random baseline |
+|---|---|---|---|---|
+| MMLU | `evals/tasks/mmlu.py` | logit at answer pos (single fwd pass/Q) | accuracy | 0.25 |
+| ARC-Easy | `evals/tasks/arc.py` | logit at answer pos | accuracy | 0.25 |
+| ARC-Challenge | `evals/tasks/arc.py` | logit at answer pos | accuracy | 0.25 |
+| HellaSwag | `evals/tasks/hellaswag.py` | per-continuation CE loss (4 fwd passes/Q) | accuracy | 0.25 |
+| GSM8K | `evals/tasks/gsm8k.py` | greedy generation + regex extraction | exact-match | 0.00 |
+| BPB | `evals/tasks/bpb.py` | per-token CE / bytes | bits/byte | n/a |
+
+**Scoring utils** (`evals/scoring.py`):
+- `logit_mc(model, prompt_ids, letters, device)` — single forward pass, compares log-probs of answer-letter tokens (` A`=317, ` B`=347, ` C`=327, ` D`=360 in GPT-2). Used for MMLU and ARC.
+- `completion_loss_mc(model, context_ids, continuations, device, block_size)` — one forward pass per multi-token continuation, picks min mean CE loss. Used for HellaSwag.
+- `generate_greedy(model, prompt_ids, max_new_tokens, device)` — calls `model.generate(top_k=1)` with KV cache, strips EOS. Used for GSM8K.
+- `centered_accuracy(raw, baseline)` — ChatCORE normalisation: `(raw − baseline) / (1 − baseline)`.
+
+**ChatCORE** = mean centered accuracy over {MMLU, ARC-Easy, ARC-Challenge, HellaSwag, GSM8K}. Printed at the end of every `eval_sft.py` run.
 
 ### Parametrization (`utils/parametrization.py`)
 
