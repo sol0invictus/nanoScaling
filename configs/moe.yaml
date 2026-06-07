@@ -1,45 +1,110 @@
-# MoE Configuration — nanoMOE-style implementation (MegaBlocks / stk backend)
+# ─────────────────────────────────────────────────────────────────────────────
+# MoE Training Config — Unsloth grouped-GEMM backend
 #
-# Requirements:
-#   pip install megablocks einops
-#   # megablocks bundles stk (sparse toolkit) and the required CUDA/Triton kernels
+# Architecture: 8-expert Switch-style MoE, top-2 routing, moe_every=2
+#   Every other transformer layer has its MLP replaced by a MoELayer.
+#   Effective param count is higher than a dense model of the same width.
+#
+# Dispatch backend (auto-selected at runtime):
+#   Fast : conda activate kernel  (PyTorch 2.7+, Triton 3.3)
+#          pip install git+https://github.com/unslothai/unsloth
+#   Slow : any env — falls back to pure-PyTorch expert loop, no extra deps
+#
+# Quick smoke test (shakespeare, CPU/GPU, <5 min):
+#   python train.py configs/moe.yaml
+#
+# Full run (openwebtext, GPU):
+#   python train.py configs/moe.yaml \
+#       --dataset=/home/nanoScaling/training_data/openwebtext \
+#       --max_iters=10000 --batch_size=12 --gradient_accumulation_steps=40
+# ─────────────────────────────────────────────────────────────────────────────
 
+# I/O
 out_dir: "out-moe"
-eval_interval: 20
-log_interval: 1
-metrics_log_interval: 10   # TensorBoard/CSV logging frequency (0 = same as log_interval)
-eval_iters: 10
-eval_only: False
-always_save_checkpoint: True
+eval_interval: 250
+log_interval: 10
+eval_iters: 20
+eval_only: false
+always_save_checkpoint: true
 init_from: "scratch"
 
-dataset: "sft_dummy"
-gradient_accumulation_steps: 1
-batch_size: 4
+# Data — shakespeare works out of the box; swap for openwebtext for real runs
+# Data
+dataset: "/home/nanoScaling/training_data/openwebtext" # 'shakespeare', 'openwebtext'
+
+# Validation dataset folders evaluated at each eval_interval.
+# Each entry is a path to a dataset folder (parquet or bin, auto-detected).
+# The folder basename is used as the key in TensorBoard (val/loss_<name>).
+val_datasets:
+  - /home/nanoScaling/val/code_val
+  - /home/nanoScaling/val/math_val
+  - /home/nanoScaling/val/wikitext_val
+
+
+gradient_accumulation_steps: 40 # 5 * 8 (example)
+batch_size: 12
 block_size: 1024
 
-# MoE settings
-use_moe: True
-num_experts: 4
-num_experts_per_tok: 2           # top-k experts activated per token
-moe_every: 2                     # apply MoE every N layers (0, 2, ...)
-norm_topk_prob: True             # normalize top-k weights to sum to 1
-load_balance_loss_weight: 0.01   # Switch Transformer load-balance loss
-router_z_loss_weight: 0.001      # router z-loss for logit stability
-# moe_hidden_dim: 512            # per-expert FFN width (default: 4 * n_embd, rounded to moe_block_size multiple)
-moe_block_size: 128              # Triton tile size for block-sparse kernels
+# ── Model ────────────────────────────────────────────────────────────────────
+n_layer: 6
+n_head:  6
+n_embd:  384
+dropout: 0.0
+bias:    false
 
-# Model (small for testing)
-n_layer: 4
-n_head: 4
-n_embd: 128
-dropout: 0.1
+# Modern architecture toggles
+use_rmsnorm: true
+use_rope:    true
+use_swiglu:  false   # MoE layers use GELU internally; keep dense layers GELU too
 
-learning_rate: 1e-4
-max_iters: 100
-warmup_iters: 10
-lr_decay_iters: 100
-min_lr: 1e-5
+# ── MoE settings ─────────────────────────────────────────────────────────────
+use_moe: true
 
-device: "cuda"
-compile: False
+# Expert count and routing
+num_experts:         8    # total experts per MoE layer
+num_experts_per_tok: 2    # top-k: each token is routed to 2 experts
+moe_every:           2    # replace MLP with MoE in layers 0, 2, 4, ...
+norm_topk_prob:      true # normalise top-k weights to sum to 1
+
+# Per-expert hidden dim (0 = 4 * n_embd = 1536, aligned to 128)
+# Set smaller to reduce per-expert compute if needed, e.g. 512
+moe_hidden_dim: 0
+
+# ── Auxiliary losses ─────────────────────────────────────────────────────────
+# Both losses are computed per MoE layer and summed into the main CE loss.
+#
+# Load-balance loss (Switch Transformer):
+#   alpha * num_experts * sum_i( f_i * P_i )
+#   f_i = fraction of tokens routed to expert i  (non-differentiable)
+#   P_i = mean routing probability to expert i   (differentiable)
+#   Encourages uniform expert utilization.
+load_balance_loss_weight: 0.01
+
+# Router z-loss (ST-MoE / OLMoE):
+#   beta * mean( logsumexp(router_logits)^2 )
+#   Penalises large logit magnitude → stabilises routing.
+router_z_loss_weight: 0.001
+
+# ── Optimizer ────────────────────────────────────────────────────────────────
+optimizer:     "adamw"
+learning_rate: 3e-4
+weight_decay:  0.1
+beta1:         0.9
+beta2:         0.95
+grad_clip:     1.0
+
+# LR schedule
+decay_lr:        true
+warmup_iters:    100
+lr_decay_iters:  2000
+min_lr:          3e-5
+max_iters:       2000
+
+# ── System ───────────────────────────────────────────────────────────────────
+device:  "cuda"
+dtype:   "bfloat16"
+compile: true   # set true when using the kernel env (unsloth path)
+
+# Logging
+tensorboard_log:      true
+tensorboard_run_name: "moe-run"

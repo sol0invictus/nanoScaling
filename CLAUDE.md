@@ -13,7 +13,10 @@ See [research_plan/muon_research_proposal.md](research_plan/muon_research_propos
 ```bash
 pip install torch numpy transformers datasets tiktoken wandb tqdm matplotlib pandas seaborn pyyaml pyarrow requests
 
-# MoE training (configs/moe.yaml) — no extra dependencies needed (pure PyTorch)
+# MoE training — pure-PyTorch fallback works out of the box (no extra deps)
+# For the fused Triton kernel path (unsloth grouped-GEMM, requires PyTorch 2.7+ / Triton 3.3):
+#   conda activate kernel
+#   pip install git+https://github.com/unslothai/unsloth
 
 # Optional — required for Hybrid Gated-Delta-Net (configs/hybrid_gated_delta_net.yaml):
 pip install flash-linear-attention

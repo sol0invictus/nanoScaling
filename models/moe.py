@@ -1,41 +1,112 @@
 """
-Mixture of Experts (MoE) implementation following nanoMOE.
-https://github.com/hbfreed/nanoMOE
+Mixture of Experts (MoE) — Unsloth grouped-GEMM backend.
 
-Uses MegaBlocks (stk + megablocks.ops) for block-sparse dispatch — no Python
-for-loop over experts. All expert FFN weights are packed into single contiguous
-w1 / w2 tensors and dispatched via token permutation + sparse matmul.
+Uses unsloth's fused Triton grouped-GEMM kernels when available (requires the
+`kernel` conda environment with PyTorch 2.7+ / Triton 3.3+).  Falls back to a
+plain PyTorch loop over experts for development / CPU / older CUDA environments.
 
-Install:
-    pip install megablocks einops
-    # megablocks ships stk (sparse toolkit) and the required CUDA/Triton kernels
+Weight layout (both paths):
+    w1  (num_experts, hidden_dim, n_embd)   — input projection per expert
+    w2  (num_experts, n_embd,    hidden_dim) — output projection per expert
 
-Design choices (from nanoMOE / OLMoE):
-  - Sigmoid routing (not softmax) — allows multi-label-style expert activation
-  - LayerNorm before the router projection
-  - norm_topk_prob: normalize selected top-k weights to sum to 1
-  - Load-balance auxiliary loss (Switch Transformer style)
-  - Router z-loss: penalizes large logit magnitudes for stability
-  - Single contiguous w1/w2 — all experts packed into one tensor
-  - Block-sparse dispatch: stk.ops.sdd / stk.ops.dsd (no per-expert loop)
+Routing:
+    Sigmoid top-k (OLMoE / nanoMOE style) with optional topk-prob normalisation.
+    Auxiliary loss = load-balance loss + router z-loss.
+
+Install for kernel path:
+    conda activate kernel            # environment with PyTorch 2.7+, Triton 3.3
+    pip install git+https://github.com/unslothai/unsloth   # or local clone
+
+References:
+    https://github.com/unslothai/unsloth/tree/main/unsloth/kernels/moe
+    https://arxiv.org/abs/2409.02060  (OLMoE)
 """
 
-import math
+from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from einops import rearrange
 
-import stk
-import stk.ops
-from megablocks import ops
-from megablocks.layers.gelu import gelu
+# ── Unsloth grouped-GEMM (optional) ──────────────────────────────────────────
+# Requires: conda activate kernel  (PyTorch 2.7+ / Triton 3.3)
+#           pip install git+https://github.com/unslothai/unsloth
+try:
+    from unsloth.kernels.moe.grouped_gemm.interface import grouped_gemm as _grouped_gemm
+    from unsloth.kernels.moe.autotune_cache import get_or_autotune_moe_kernels as _autotune
+    _HAS_UNSLOTH = True
+except ImportError:
+    _grouped_gemm = None
+    _autotune     = None
+    _HAS_UNSLOTH  = False
 
+
+# ── Routing helpers (pure PyTorch, no megablocks) ────────────────────────────
+
+def _get_routing_indices(
+    topk_ids: torch.Tensor, num_experts: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute token-counts-per-expert and the stable-sort gather indices.
+
+    Args:
+        topk_ids : (N * top_k,) int64 — flat expert assignments
+        num_experts : int
+
+    Returns:
+        m_sizes       : (num_experts,) int32 — token count per expert
+        gather_indices: (N * top_k,) int32  — argsort(topk_ids, stable=True)
+    """
+    m_sizes = torch.histc(
+        topk_ids.float(), bins=num_experts, min=0, max=num_experts - 1
+    ).to(torch.int32)
+    gather_indices = torch.argsort(topk_ids, stable=True).to(torch.int32)
+    return m_sizes, gather_indices
+
+
+# ── Pure-PyTorch fallback dispatch ───────────────────────────────────────────
+
+def _moe_forward_pytorch(
+    x_flat:         torch.Tensor,   # (N, C)
+    w1:             torch.Tensor,   # (E, H, C)
+    w2:             torch.Tensor,   # (E, C, H)
+    expert_weights: torch.Tensor,   # (N, top_k)
+    expert_indices: torch.Tensor,   # (N, top_k) int64
+    num_experts:    int,
+) -> torch.Tensor:
+    """
+    Loop-based reference dispatch.  Correct but O(E) Python overhead.
+    """
+    N, C = x_flat.shape
+    top_k = expert_indices.shape[1]
+    out = torch.zeros_like(x_flat)
+
+    # Expand tokens for each expert assignment
+    x_exp     = x_flat.unsqueeze(1).expand(N, top_k, C)          # (N, K, C)
+    w_flat    = expert_weights.reshape(N * top_k)                 # (N*K,)
+    idx_flat  = expert_indices.reshape(N * top_k)                 # (N*K,)
+    x_flat_k  = x_exp.reshape(N * top_k, C)                      # (N*K, C)
+
+    for e in range(num_experts):
+        mask = (idx_flat == e).nonzero(as_tuple=True)[0]
+        if mask.numel() == 0:
+            continue
+        xe  = x_flat_k[mask]                                      # (m, C)
+        h   = F.gelu(xe @ w1[e].T)                                # (m, H)
+        ye  = h @ w2[e].T                                         # (m, C)
+        # Scatter-add with routing weights
+        src_tokens = mask // top_k                                 # which original token
+        out.index_add_(0, src_tokens, ye * w_flat[mask].unsqueeze(-1))
+
+    return out
+
+
+# ── Router ───────────────────────────────────────────────────────────────────
 
 class MoERouter(nn.Module):
     """
-    Sigmoid top-k router with LayerNorm before the projection (OLMoE / nanoMOE).
+    Sigmoid top-k router with LayerNorm before projection (OLMoE / nanoMOE).
 
     Returns routing weights + indices for each token, plus a combined auxiliary
     loss (load-balance + z-loss).
@@ -43,45 +114,44 @@ class MoERouter(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
-        self.norm_topk_prob = getattr(config, 'norm_topk_prob', True)
+        self.num_experts            = config.num_experts
+        self.top_k                  = config.num_experts_per_tok
+        self.norm_topk_prob         = getattr(config, 'norm_topk_prob', True)
         self.load_balance_loss_weight = getattr(config, 'load_balance_loss_weight', 0.01)
-        self.router_z_loss_weight = getattr(config, 'router_z_loss_weight', 0.001)
+        self.router_z_loss_weight   = getattr(config, 'router_z_loss_weight', 0.001)
 
-        # LN before projection (nanoMOE / OLMoE practice)
-        self.norm = nn.LayerNorm(config.n_embd, bias=False)
+        self.norm   = nn.LayerNorm(config.n_embd, bias=False)
         self.linear = nn.Linear(config.n_embd, self.num_experts, bias=False)
-        self.sort_end_bit = max(int(math.ceil(math.log2(self.num_experts))), 1)
 
-    def forward(self, x_flat):
+    def forward(self, x_flat: torch.Tensor):
         """
         Args:
-            x_flat: (N, C) flattened token representations
+            x_flat: (N, C)
         Returns:
-            expert_weights:    (N, top_k)  routing weights
-            expert_indices:    (N, top_k)  selected expert indices
-            aux_loss:          scalar
-            tokens_per_expert: (num_experts,) int32 — token counts for dispatch
+            expert_weights : (N, top_k)  normalized routing weights
+            expert_indices : (N, top_k)  int64 expert indices
+            aux_loss       : scalar
         """
-        router_logits = self.linear(self.norm(x_flat))   # (N, num_experts)
+        router_logits = self.linear(self.norm(x_flat))             # (N, E)
 
-        # z-loss: penalizes large logit magnitude for routing stability
+        # z-loss: penalizes large logit magnitude
         z_loss = torch.mean(torch.logsumexp(router_logits, dim=-1) ** 2)
 
-        # Sigmoid routing — not softmax (nanoMOE style)
-        router_probs = torch.sigmoid(router_logits)      # (N, num_experts)
+        # Sigmoid routing (not softmax)
+        router_probs = torch.sigmoid(router_logits)
 
         expert_weights, expert_indices = torch.topk(router_probs, self.top_k, dim=-1)
 
         if self.norm_topk_prob:
             expert_weights = expert_weights / (expert_weights.sum(dim=-1, keepdim=True) + 1e-9)
 
-        # Token counts per expert (non-differentiable density f_i)
-        tokens_per_expert = ops.histogram(expert_indices.flatten().int(), self.num_experts)
-
         # Load-balance loss: num_experts * sum(f_i * P_i)
-        f_i = tokens_per_expert.float() / (x_flat.shape[0] * self.top_k)
+        N = x_flat.shape[0]
+        token_counts = torch.bincount(
+            expert_indices.flatten().to(torch.long),
+            minlength=self.num_experts,
+        ).float()
+        f_i = token_counts / (N * self.top_k)
         P_i = router_probs.mean(dim=0)
         load_balance_loss = self.num_experts * (f_i * P_i).sum()
 
@@ -90,53 +160,57 @@ class MoERouter(nn.Module):
             + self.router_z_loss_weight * z_loss
         )
 
-        return expert_weights, expert_indices, aux_loss, tokens_per_expert
+        return expert_weights, expert_indices.to(torch.int64), aux_loss
 
+
+# ── MoE Layer ────────────────────────────────────────────────────────────────
 
 class MoELayer(nn.Module):
     """
-    Block-sparse Mixture of Experts FFN using MegaBlocks (stk).
+    MoE FFN block.
 
-    All expert weights live in two flat tensors:
-        w1: (n_embd, num_experts * hidden_dim)  — input projection
-        w2: (num_experts * hidden_dim, n_embd)  — output projection
+    When `unsloth.kernels.moe` is importable (kernel conda env), dispatches via
+    fused Triton grouped-GEMM kernels.  Otherwise falls back to a plain PyTorch
+    loop over experts.
 
-    Dispatch is done via token permutation + stk.ops.sdd / stk.ops.dsd,
-    matching nanoMOE's kernel path with no Python loop over experts.
+    Weight shapes:
+        w1: (num_experts, hidden_dim, n_embd)   — up-projection
+        w2: (num_experts, n_embd,    hidden_dim) — down-projection
 
-    Additional config fields:
-        moe_hidden_dim  — per-expert FFN width (default 4 * n_embd, rounded up
-                          to a multiple of moe_block_size)
-        moe_block_size  — Triton tile size for block-sparse kernels (default 128)
+    Forward:
+        h   = GELU(x_expert @ w1_expert.T)
+        out = sum_k( weight_k * h_k @ w2_expert.T )
     """
 
     def __init__(self, config):
         super().__init__()
         self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
-        self.n_embd = config.n_embd
-        self.block_size = getattr(config, 'moe_block_size', 128)
+        self.top_k       = config.num_experts_per_tok
+        self.n_embd      = config.n_embd
 
         hidden_dim = getattr(config, 'moe_hidden_dim', 0) or (4 * config.n_embd)
-        # Round up to a block_size multiple (required by stk sparse kernels)
-        hidden_dim = self.block_size * ((hidden_dim + self.block_size - 1) // self.block_size)
+        # Align to 128 for kernel efficiency
+        hidden_dim = 128 * math.ceil(hidden_dim / 128)
         self.hidden_dim = hidden_dim
-        self.blocks_per_expert = hidden_dim // self.block_size
-        self.total_expert_width = hidden_dim * self.num_experts
 
-        self.sort_end_bit = max(int(math.ceil(math.log2(self.num_experts))), 1)
-        max_col = self.total_expert_width // self.block_size
-        self.transpose_sort_end_bit = max(int(math.ceil(math.log2(max(max_col, 2)))), 1)
-
-        # Packed weight tensors — nanoMOE style (single tensor covers all experts)
-        self.w1 = nn.Parameter(torch.empty(self.n_embd, self.total_expert_width))
-        self.w2 = nn.Parameter(torch.empty(self.total_expert_width, self.n_embd))
+        E, H, C = self.num_experts, hidden_dim, config.n_embd
+        self.w1 = nn.Parameter(torch.empty(E, H, C))
+        self.w2 = nn.Parameter(torch.empty(E, C, H))
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02, a=-0.06, b=0.06)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=0.02, a=-0.06, b=0.06)
 
         self.router = MoERouter(config)
 
-    def forward(self, x):
+        # Kernel configs (populated lazily on first unsloth forward pass)
+        self._kernel_config_fwd   = None
+        self._kernel_config_bwd_dX = None
+        self._kernel_config_bwd_dW = None
+
+    @property
+    def use_unsloth(self) -> bool:
+        return _HAS_UNSLOTH and self.w1.is_cuda
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x: (B, T, C)
@@ -145,90 +219,93 @@ class MoELayer(nn.Module):
             aux_loss: scalar
         """
         B, T, C = x.shape
-        x_flat = rearrange(x, 'b t c -> (b t) c')   # (N, C)
+        N = B * T
+        x_flat = x.reshape(N, C)                                   # (N, C)
 
-        expert_weights, expert_indices, aux_loss, tokens_per_expert = self.router(x_flat)
+        expert_weights, expert_indices, aux_loss = self.router(x_flat)
 
-        expert_weights_flat = expert_weights.to(x.dtype).flatten()   # (N * top_k,)
-        expert_indices_flat = expert_indices.flatten().int()          # (N * top_k,)
+        if self.use_unsloth:
+            out_flat = self._forward_unsloth(x_flat, expert_weights, expert_indices)
+        else:
+            out_flat = _moe_forward_pytorch(
+                x_flat, self.w1, self.w2, expert_weights, expert_indices, self.num_experts
+            )
 
-        # --- Sort tokens into expert order ---
-        bin_ids, indices = ops.sort(expert_indices_flat, self.sort_end_bit)
+        return out_flat.reshape(B, T, C), aux_loss
 
-        # --- Pad each expert's bin to a block_size multiple ---
-        padded_tokens_per_expert = ops.round_up(tokens_per_expert, self.block_size)
-        padded_bins = ops.inclusive_cumsum(padded_tokens_per_expert, 0).contiguous()
-        bins = ops.inclusive_cumsum(tokens_per_expert, 0).contiguous()
+    def _get_kernel_configs(self, dtype: torch.dtype):
+        """Lazily fetch (and cache) autotuned kernel configs for this layer shape."""
+        if self._kernel_config_fwd is None and _autotune is not None:
+            try:
+                (
+                    self._kernel_config_fwd,
+                    self._kernel_config_bwd_dX,
+                    self._kernel_config_bwd_dW,
+                ) = _autotune(
+                    num_experts      = self.num_experts,
+                    hidden_dim       = self.n_embd,       # input dim (C)
+                    intermediate_dim = self.hidden_dim,   # expert hidden dim (H)
+                    top_k            = self.top_k,
+                    dtype            = dtype,
+                )
+            except Exception:
+                pass   # fall through to autotune=True per-call default
+        return self._kernel_config_fwd, self._kernel_config_bwd_dX, self._kernel_config_bwd_dW
 
-        # --- Permute tokens into expert-sorted order (with padding) ---
-        x_permuted = ops.padded_gather(x_flat, indices, bin_ids, bins, padded_bins, self.top_k)
-
-        # --- Build block-sparse topology ---
-        topology = self._build_topology(x_flat, padded_bins, padded_tokens_per_expert)
-
-        # --- Sparse FFN: w1 → GELU → w2 (no per-expert loop) ---
-        x_permuted = stk.ops.sdd(x_permuted, self.w1, topology)   # sparse output
-        x_permuted = gelu(x_permuted)
-        x_permuted = stk.ops.dsd(x_permuted, self.w2)             # dense output
-
-        # --- Scatter back and apply routing weights ---
-        out_flat = ops.padded_scatter(
-            x_permuted, indices, bin_ids, expert_weights_flat, bins, padded_bins, self.top_k
-        )
-
-        return rearrange(out_flat, '(b t) c -> b t c', b=B, t=T), aux_loss
-
-    def _build_topology(self, x, padded_bins, padded_tokens_per_expert):
+    def _forward_unsloth(
+        self,
+        x_flat:         torch.Tensor,   # (N, C)
+        expert_weights: torch.Tensor,   # (N, top_k)
+        expert_indices: torch.Tensor,   # (N, top_k) int64
+    ) -> torch.Tensor:
         """
-        Build the stk.Matrix describing the block-sparse pattern for uniform experts.
+        Fused Triton dispatch via unsloth grouped_gemm.
 
-        For expert i:
-          - Row blocks:    [cumsum_padded[i-1] // bs,  cumsum_padded[i] // bs)
-          - Column blocks: [i * bpe,  (i+1) * bpe)
-        where bpe = blocks_per_expert = hidden_dim // block_size.
+        Flow:
+            1. get_routing_indices → m_sizes, gather_indices
+            2. 1st GEMM (permute_x=True):  (N, C) → (N*K, H) in expert order
+            3. GELU
+            4. 2nd GEMM (permute_y=True, fuse_mul_post=True):
+                         (N*K, H) → (N, C) unpermuted and weighted in one pass
         """
-        padded_tokens = padded_bins[-1].clamp_min(self.block_size)
-        block_rows = int((padded_tokens // self.block_size).item())
-        bpe = self.blocks_per_expert
-        device = x.device
-        dtype = x.dtype
+        topk_ids = expert_indices.flatten().to(torch.int64)
+        m_sizes, gather_indices = _get_routing_indices(topk_ids, self.num_experts)
+        topk_weights_flat = expert_weights.flatten()   # (N*top_k,)
 
-        # Number of row blocks assigned to each expert
-        expert_token_blocks = (padded_tokens_per_expert // self.block_size).long()  # (E,)
+        cfg_fwd, cfg_bwd_dX, cfg_bwd_dW = self._get_kernel_configs(x_flat.dtype)
 
-        # For each row block r owned by expert e: column blocks = [e*bpe, ..., (e+1)*bpe - 1]
-        row_block_expert = torch.repeat_interleave(
-            torch.arange(self.num_experts, dtype=torch.int32, device=device),
-            expert_token_blocks,
-        )  # (block_rows,)
+        # 1st GEMM: (N, C) → (N*K, H), permuting tokens into expert order
+        intermediate = _grouped_gemm(
+            X              = x_flat,
+            W              = self.w1,
+            m_sizes        = m_sizes,
+            topk           = self.top_k,
+            gather_indices = gather_indices,
+            permute_x      = True,
+            permute_y      = False,
+            is_first_gemm  = True,
+            kernel_config_fwd  = cfg_fwd,
+            kernel_config_bwd_dX = cfg_bwd_dX,
+            kernel_config_bwd_dW = cfg_bwd_dW,
+        )   # (N * top_k, H) in expert-sorted order
 
-        k = torch.arange(bpe, dtype=torch.int32, device=device)
-        column_indices = (row_block_expert.unsqueeze(1) * bpe + k.unsqueeze(0)).reshape(-1)
-        # (block_rows * bpe,) — one entry per nonzero block
+        intermediate = F.gelu(intermediate)
 
-        # CSR row offsets: each row block has exactly bpe nonzero column blocks
-        offsets = torch.arange(block_rows + 1, dtype=torch.int32, device=device) * bpe
+        # 2nd GEMM: (N*K, H) → (N, C), unpermuting + weighted scatter-add fused
+        out = _grouped_gemm(
+            X              = intermediate,
+            W              = self.w2,
+            m_sizes        = m_sizes,
+            topk           = self.top_k,
+            gather_indices = gather_indices,
+            permute_x      = False,
+            permute_y      = True,
+            topk_weights   = topk_weights_flat,
+            fuse_mul_post  = True,
+            is_first_gemm  = False,
+            kernel_config_fwd  = cfg_fwd,
+            kernel_config_bwd_dX = cfg_bwd_dX,
+            kernel_config_bwd_dW = cfg_bwd_dW,
+        )   # (N, C)
 
-        shape = (int(padded_tokens.item()), self.total_expert_width)
-        num_blocks = column_indices.numel()
-        data = torch.empty(num_blocks, self.block_size, self.block_size, dtype=dtype, device='meta')
-
-        column_indices = column_indices.to(torch.int32)
-        row_indices = stk.ops.row_indices(shape, data, offsets, column_indices).to(torch.int32)
-        col_t, off_t, blk_t = self._sparse_transpose(shape, row_indices, column_indices)
-
-        return stk.Matrix(shape, data, row_indices, column_indices, offsets, col_t, off_t, blk_t)
-
-    def _sparse_transpose(self, size, row_indices, column_indices):
-        """Compute transposed CSR indices needed by stk.ops.dsd."""
-        block_columns = self.total_expert_width // self.block_size
-        _, gather_indices = ops.sort(column_indices.int(), self.transpose_sort_end_bit)
-        column_indices_t = row_indices.gather(0, gather_indices.long()).to(torch.int32)
-        block_offsets_t = gather_indices.to(torch.int32)
-        zero = torch.zeros(1, dtype=torch.int32, device=row_indices.device)
-        nnz_per_col = ops.histogram(column_indices, block_columns)
-        nnz_per_col = ops.inclusive_cumsum(nnz_per_col, 0)
-        if nnz_per_col.dim() == 0:
-            nnz_per_col = nnz_per_col.unsqueeze(0)
-        offsets_t = torch.cat([zero, nnz_per_col]).to(torch.int32)
-        return column_indices_t, offsets_t, block_offsets_t
+        return out

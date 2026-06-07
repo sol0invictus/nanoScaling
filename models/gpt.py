@@ -26,9 +26,10 @@ except ImportError:
     _FLASH_ATTN_AVAILABLE = False
     _FLASH_ATTN_VERSION = 0
 
-# from models.moe import MoELayer
-# temporary issue with MoE Layer
-MoELayer = None
+try:
+    from models.moe import MoELayer
+except ImportError:
+    MoELayer = None
 # -----------------------------------------------------------------------------
 # Architecture Modernization: RMSNorm, RoPE, SwiGLU
 
@@ -359,6 +360,8 @@ class Block(nn.Module):
                  self.use_moe = True
                  
         if self.use_moe:
+            if MoELayer is None:
+                raise ImportError("MoELayer could not be imported from models.moe")
             self.mlp = MoELayer(config)
         elif getattr(config, 'use_swiglu', False):
              self.mlp = SwiGLUMLP(config)
