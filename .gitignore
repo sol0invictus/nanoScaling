@@ -18,3 +18,7 @@ research_plan/
 val/
 training_data/
 experiments/rq1_spectral_geometry/analysis/
+*.npy
+out-125*/
+*.log
+*.json

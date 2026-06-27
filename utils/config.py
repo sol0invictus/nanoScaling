@@ -65,6 +65,21 @@ class ExperimentConfig:
     moe_hidden_dim: int = 0      # 0 = default 4*n_embd; set explicitly to override
     moe_block_size: int = 128    # Triton tile size for block-sparse kernels
 
+    # CSA — DeepSeek-V4 Compressed Sparse Attention (replaces standard attention
+    # in every layer when use_csa=True). See experiments/csa_hca/.
+    use_csa: bool = False
+    csa_compress_ratio: int = 4        # m: tokens compressed into one KV entry
+    csa_top_k: int = 64                # compressed blocks attended per query
+    csa_window: int = 128              # sliding-window size (uncompressed recent tokens)
+    csa_q_compress_dim: int = 256      # low-rank query latent dim (d_c)
+    csa_n_groups: int = 4              # output-projection groups (must divide n_head)
+    csa_group_inter_dim: int = 0       # 0 = head_dim*(n_head//n_groups)
+    csa_n_idx_head: int = 8            # Lightning Indexer query heads
+    csa_idx_head_dim: int = 0          # 0 = head_dim
+    csa_rope_head_dim: int = 0         # 0 = head_dim//2 (partial RoPE)
+    csa_rope_theta: float = 10000.0
+    csa_indexer_loss_weight: float = 0.01  # weight on the indexer distillation aux loss
+
     # Flash Attention 3 (requires: pip install flash-attn>=3.0, H100/Hopper GPU recommended)
     use_flash_attn3: bool = False
 

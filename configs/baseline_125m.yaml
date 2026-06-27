@@ -1,0 +1,48 @@
+# 125M baseline (standard causal attention) — 200M-token comparison run
+out_dir: "out-125m-baseline"
+eval_interval: 100
+log_interval: 10
+eval_iters: 40
+eval_only: false
+always_save_checkpoint: false
+init_from: "scratch"
+
+dataset: "/home/nanoScaling/training_data/openwebtext"
+val_datasets: []            # use the internal openwebtext val split only
+
+# ~200M tokens: 8 * 16 * 1024 = 131,072 tokens/iter * 1525 = 199.8M
+batch_size: 8
+gradient_accumulation_steps: 16
+block_size: 1024
+
+# Model (GPT-2 124M shape)
+n_layer: 12
+n_head: 12
+n_embd: 768
+dropout: 0.0
+bias: false
+use_rmsnorm: true
+use_rope: true
+use_swiglu: true
+
+use_csa: false              # standard causal self-attention
+
+# Optimizer
+optimizer: "adamw"
+learning_rate: 6.0e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+decay_lr: true
+warmup_iters: 80
+lr_decay_iters: 1525
+min_lr: 6.0e-5
+max_iters: 1525
+
+device: "cuda"
+dtype: "bfloat16"
+compile: true
+
+tensorboard_log: true
+tensorboard_run_name: "125m-baseline"

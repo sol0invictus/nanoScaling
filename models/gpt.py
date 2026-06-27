@@ -30,6 +30,18 @@ try:
     from models.moe import MoELayer
 except ImportError:
     MoELayer = None
+
+# DeepSeek-V4 Compressed Sparse Attention (lives under experiments/, which is
+# shadowed by the top-level experiments.py, so import it by path).
+try:
+    import os as _os, sys as _sys
+    _csa_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                             'experiments', 'csa_hca')
+    if _csa_dir not in _sys.path:
+        _sys.path.insert(0, _csa_dir)
+    from csa import CompressedSparseAttention
+except Exception:
+    CompressedSparseAttention = None
 # -----------------------------------------------------------------------------
 # Architecture Modernization: RMSNorm, RoPE, SwiGLU
 
@@ -331,6 +343,50 @@ class SwiGLUMLP(nn.Module):
         hidden = F.silu(x1) * x2
         return self.dropout(self.c_proj(hidden))
 
+class CSABlockAttention(nn.Module):
+    """Adapts DeepSeek-V4 CompressedSparseAttention to the Block's attention API.
+
+    CSA is inherently causal and full-sequence (no KV cache), so attn_mask /
+    kv_cache / position_offset are ignored (training/full-seq use only). The
+    indexer distillation loss (the indexer's top-k is non-differentiable, so it
+    needs its own objective) is stashed on self._aux for the Block to fold into
+    the model's aux loss.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        if CompressedSparseAttention is None:
+            raise ImportError("CompressedSparseAttention could not be imported from experiments/csa_hca")
+        n_embd, n_head = config.n_embd, config.n_head
+        head_dim = n_embd // n_head
+        n_groups = getattr(config, 'csa_n_groups', 4) or 4
+        self.indexer_loss_weight = getattr(config, 'csa_indexer_loss_weight', 0.01)
+        # 0 means "auto-derive" for these three.
+        group_inter_dim = getattr(config, 'csa_group_inter_dim', 0) or head_dim * (n_head // n_groups)
+        idx_head_dim = getattr(config, 'csa_idx_head_dim', 0) or head_dim
+        rope_head_dim = getattr(config, 'csa_rope_head_dim', 0) or head_dim // 2
+        self.csa = CompressedSparseAttention(
+            dim=n_embd, n_head=n_head, head_dim=head_dim,
+            q_compress_dim=getattr(config, 'csa_q_compress_dim', 256),
+            window=getattr(config, 'csa_window', 128),
+            n_groups=n_groups,
+            group_inter_dim=group_inter_dim,
+            compress_ratio=getattr(config, 'csa_compress_ratio', 4),
+            top_k=getattr(config, 'csa_top_k', 64),
+            n_idx_head=getattr(config, 'csa_n_idx_head', 8),
+            idx_head_dim=idx_head_dim,
+            rope_head_dim=rope_head_dim,
+            rope_theta=getattr(config, 'csa_rope_theta', 10000.0),
+            rope_max_seq_len=getattr(config, 'block_size', 1024),
+        )
+        self._aux = 0.0
+
+    def forward(self, x, attn_mask=None, kv_cache=None, position_offset=0):
+        out, aux = self.csa(x, return_aux=True)
+        self._aux = self.indexer_loss_weight * aux
+        return out, None
+
+
 class Block(nn.Module):
 
     def __init__(self, config, layer_idx=None):
@@ -344,6 +400,8 @@ class Block(nn.Module):
         if use_hybrid and layer_idx is not None and layer_idx % delta_net_every == 0:
             from models.gated_delta_net import GatedDeltaNetLayer
             self.attn = GatedDeltaNetLayer(config)
+        elif getattr(config, 'use_csa', False):
+            self.attn = CSABlockAttention(config)
         else:
             self.attn = CausalSelfAttention(config)
 
@@ -373,25 +431,27 @@ class Block(nn.Module):
         if self._norm_position == 'post':
             # Post-LN: norm applied after residual addition
             attn_out, new_kv_cache = self.attn(x, attn_mask=attn_mask, kv_cache=kv_cache, position_offset=position_offset)
+            attn_aux = getattr(self.attn, '_aux', 0.0)   # CSA indexer loss (0 otherwise)
             x = self.ln_1(x + attn_out)
             if self.use_moe:
                 mlp_out, aux_loss = self.mlp(x)
                 x = self.ln_2(x + mlp_out)
-                return x, aux_loss, new_kv_cache
+                return x, aux_loss + attn_aux, new_kv_cache
             else:
                 x = self.ln_2(x + self.mlp(x))
-                return x, 0.0, new_kv_cache
+                return x, attn_aux, new_kv_cache
         else:
             # Pre-LN or No-Norm (ln_1/ln_2 are nn.Identity when norm_position='none')
             attn_out, new_kv_cache = self.attn(self.ln_1(x), attn_mask=attn_mask, kv_cache=kv_cache, position_offset=position_offset)
+            attn_aux = getattr(self.attn, '_aux', 0.0)   # CSA indexer loss (0 otherwise)
             x = x + attn_out
             if self.use_moe:
                 mlp_out, aux_loss = self.mlp(self.ln_2(x))
                 x = x + mlp_out
-                return x, aux_loss, new_kv_cache
+                return x, aux_loss + attn_aux, new_kv_cache
             else:
                 x = x + self.mlp(self.ln_2(x))
-                return x, 0.0, new_kv_cache
+                return x, attn_aux, new_kv_cache
 
 @dataclass
 class GPTConfig:

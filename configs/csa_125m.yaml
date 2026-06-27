@@ -1,0 +1,59 @@
+# 125M with DeepSeek-V4 Compressed Sparse Attention in every layer
+# — 200M-token comparison run (identical to baseline_125m.yaml except attention)
+out_dir: "out-125m-csa"
+eval_interval: 100
+log_interval: 10
+eval_iters: 40
+eval_only: false
+always_save_checkpoint: false
+init_from: "scratch"
+
+dataset: "/home/nanoScaling/training_data/openwebtext"
+val_datasets: []            # use the internal openwebtext val split only
+
+# ~200M tokens: 8 * 16 * 1024 = 131,072 tokens/iter * 1525 = 199.8M
+batch_size: 8
+gradient_accumulation_steps: 16
+block_size: 1024
+
+# Model (GPT-2 124M shape)
+n_layer: 12
+n_head: 12
+n_embd: 768
+dropout: 0.0
+bias: false
+use_rmsnorm: true
+use_rope: true              # CSA brings its own partial RoPE; this disables wpe
+use_swiglu: true
+
+# ── CSA (all layers) ─────────────────────────────────────────────────────────
+use_csa: true
+csa_compress_ratio: 4       # m: 4 tokens -> 1 compressed KV entry
+csa_top_k: 64               # compressed blocks attended per query (of 256)
+csa_window: 128             # recent uncompressed tokens
+csa_q_compress_dim: 256     # low-rank query latent
+csa_n_groups: 4             # output-projection groups (divides n_head=12)
+csa_n_idx_head: 8           # Lightning Indexer query heads
+csa_idx_head_dim: 0         # 0 = head_dim (64)
+csa_rope_head_dim: 0        # 0 = head_dim//2 (32)
+csa_indexer_loss_weight: 0.01
+
+# Optimizer (identical to baseline)
+optimizer: "adamw"
+learning_rate: 6.0e-4
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+decay_lr: true
+warmup_iters: 80
+lr_decay_iters: 1525
+min_lr: 6.0e-5
+max_iters: 1525
+
+device: "cuda"
+dtype: "bfloat16"
+compile: true
+
+tensorboard_log: true
+tensorboard_run_name: "125m-csa"
