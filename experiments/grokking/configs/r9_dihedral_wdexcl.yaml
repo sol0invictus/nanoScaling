@@ -1,0 +1,25 @@
+# post-grok stability test: exclude 1D params from weight decay
+task: dihedral_48
+train_frac: 0.3
+weight_decay: 1.0
+seed: 0
+optimizer: adamw
+wd_exclude_1d: true
+n_layer: 2
+n_embd: 128
+n_head: 4
+lr: 0.001
+betas:
+- 0.9
+- 0.98
+warmup_steps: 10
+batch_size: 512
+max_steps: 30000
+cheap_every: 25
+expensive_every: 250
+n_checkpoints: 30
+device: cuda
+out_dir: runs/r9_dihedral_wdexcl
+run_name: r9_dihedral_wdexcl
+tags:
+  purpose: same as R3 but weight decay excluded from 1D params (LayerNorm/bias)

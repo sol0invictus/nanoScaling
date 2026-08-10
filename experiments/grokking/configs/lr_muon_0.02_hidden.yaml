@@ -1,0 +1,26 @@
+# LR study: Muon lr=0.02 (hidden scope)
+task: dihedral_48
+train_frac: 0.3
+weight_decay: 1.0
+seed: 0
+n_layer: 2
+n_embd: 128
+n_head: 4
+betas:
+- 0.9
+- 0.98
+warmup_steps: 10
+batch_size: 512
+cheap_every: 25
+expensive_every: 250
+n_checkpoints: 25
+device: cuda
+optimizer: muon
+lr: 0.001
+muon_lr: 0.02
+muon_scope: hidden
+max_steps: 10000
+out_dir: runs/lr_muon_0.02_hidden
+run_name: lr_muon_0.02_hidden
+tags:
+  purpose: Muon lr=0.02 (hidden scope)
