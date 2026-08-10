@@ -1,0 +1,23 @@
+# NEW TASK main run: D_48 at 30% data
+n_layer: 2
+n_embd: 128
+n_head: 4
+lr: 0.001
+betas:
+- 0.9
+- 0.98
+warmup_steps: 10
+batch_size: 512
+cheap_every: 25
+expensive_every: 250
+n_checkpoints: 40
+device: cuda
+task: dihedral_48
+train_frac: 0.3
+weight_decay: 1.0
+seed: 0
+max_steps: 50000
+out_dir: runs/r3_dihedral_main
+run_name: r3_dihedral_main
+tags:
+  purpose: 'NEW TASK main run: D_48 at 30% data'

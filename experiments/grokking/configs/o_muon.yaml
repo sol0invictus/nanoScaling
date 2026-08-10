@@ -1,0 +1,25 @@
+# optimizer study: Muon (Newton-Schulz orthogonalised 2D updates) + AdamW on 1D
+task: dihedral_48
+train_frac: 0.3
+weight_decay: 1.0
+seed: 0
+n_layer: 2
+n_embd: 128
+n_head: 4
+betas:
+- 0.9
+- 0.98
+warmup_steps: 10
+batch_size: 512
+max_steps: 30000
+cheap_every: 25
+expensive_every: 250
+n_checkpoints: 30
+device: cuda
+optimizer: muon
+lr: 0.001
+muon_lr: 0.02
+out_dir: runs/o_muon
+run_name: o_muon
+tags:
+  purpose: Muon (Newton-Schulz orthogonalised 2D updates) + AdamW on 1D

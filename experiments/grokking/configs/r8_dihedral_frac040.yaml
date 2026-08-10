@@ -1,0 +1,23 @@
+# more data -> earlier grok
+n_layer: 2
+n_embd: 128
+n_head: 4
+lr: 0.001
+betas:
+- 0.9
+- 0.98
+warmup_steps: 10
+batch_size: 512
+cheap_every: 25
+expensive_every: 250
+n_checkpoints: 40
+device: cuda
+task: dihedral_48
+train_frac: 0.4
+weight_decay: 1.0
+seed: 0
+max_steps: 50000
+out_dir: runs/r8_dihedral_frac040
+run_name: r8_dihedral_frac040
+tags:
+  purpose: more data -> earlier grok

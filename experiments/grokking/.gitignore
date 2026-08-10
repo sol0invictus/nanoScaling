@@ -1,0 +1,4 @@
+# Training outputs: ~1.7 GB of checkpoints and per-step CSV logs.
+# Regenerate with `bash run_grid.sh`, then `python analysis.py` for the figures.
+runs/
+__pycache__/

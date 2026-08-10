@@ -1,0 +1,23 @@
+# paper Fig.1 reproduction: x/y mod 97 at 50% data
+n_layer: 2
+n_embd: 128
+n_head: 4
+lr: 0.001
+betas:
+- 0.9
+- 0.98
+warmup_steps: 10
+batch_size: 512
+cheap_every: 25
+expensive_every: 250
+n_checkpoints: 40
+device: cuda
+task: mod_div_97
+train_frac: 0.5
+weight_decay: 1.0
+seed: 0
+max_steps: 100000
+out_dir: runs/r1_mod_div_control
+run_name: r1_mod_div_control
+tags:
+  purpose: 'paper Fig.1 reproduction: x/y mod 97 at 50% data'

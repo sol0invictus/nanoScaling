@@ -1,0 +1,773 @@
+<title>Grokking in a non-abelian group</title>
+<style>
+  :root{
+    --ground:#F7F8F9; --surface:#FFFFFF; --surface-2:#F1F3F5;
+    --ink:#14181D; --ink-2:#3D4650; --ink-3:#6B7683;
+    --rule:#DDE2E7; --rule-strong:#C3CBD3;
+    --accent:#0072B2; --mark:#C2541A;
+    --accent-soft:rgba(0,114,178,.07);
+    --serif:"Charter","Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#0E1216; --surface:#151A20; --surface-2:#1B2128;
+      --ink:#E6EAEE; --ink-2:#A8B2BC; --ink-3:#78838E;
+      --rule:#262E36; --rule-strong:#38424C;
+      --accent:#5AA9DA; --mark:#E88B52;
+      --accent-soft:rgba(90,169,218,.12);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0E1216; --surface:#151A20; --surface-2:#1B2128;
+    --ink:#E6EAEE; --ink-2:#A8B2BC; --ink-3:#78838E;
+    --rule:#262E36; --rule-strong:#38424C;
+    --accent:#5AA9DA; --mark:#E88B52;
+    --accent-soft:rgba(90,169,218,.12);
+  }
+
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:var(--serif); font-size:17px; line-height:1.68;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1000px; margin:0 auto; padding:clamp(2rem,5vw,4.5rem) clamp(1.1rem,4vw,2.5rem) 6rem;}
+  .col{max-width:68ch;}
+
+  h1,h2,h3{text-wrap:balance; margin:0;}
+  h1{font-size:clamp(2rem,4.6vw,3rem); line-height:1.12; letter-spacing:-.015em; font-weight:600;}
+  h2{font-size:clamp(1.3rem,2.4vw,1.65rem); line-height:1.25; font-weight:600; letter-spacing:-.008em;}
+  h3{font-size:1.06rem; font-weight:600; color:var(--ink);}
+  p{margin:0;}
+  a{color:var(--accent);}
+
+  .eyebrow{
+    font-family:var(--mono); font-size:.68rem; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--ink-3);
+  }
+
+  /* masthead */
+  header.masthead{display:flex; flex-direction:column; gap:1.1rem; padding-bottom:2rem;
+    border-bottom:2px solid var(--ink); margin-bottom:2.5rem;}
+  .standfirst{font-size:1.16rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+  .byline{display:flex; flex-wrap:wrap; gap:.5rem 1.6rem; font-family:var(--mono);
+    font-size:.74rem; color:var(--ink-3); padding-top:.4rem;}
+  .byline b{color:var(--ink-2); font-weight:500;}
+
+  /* sections */
+  section{display:flex; flex-direction:column; gap:1.15rem; margin-top:3.4rem;}
+  .sec-head{display:flex; align-items:baseline; gap:.85rem; border-top:1px solid var(--rule);
+    padding-top:1.1rem;}
+  .sec-num{font-family:var(--mono); font-size:.78rem; color:var(--accent); font-weight:600;
+    letter-spacing:.06em; flex:none;}
+  section > p, section > ul, section > .col{max-width:68ch;}
+  ul{margin:0; padding-left:1.15rem; display:flex; flex-direction:column; gap:.5rem;}
+  li::marker{color:var(--ink-3);}
+  ul.findings{gap:.85rem; padding-left:0; list-style:none; max-width:72ch;}
+  ul.findings li{padding-left:1.15rem; border-left:2px solid var(--rule);}
+  ul.findings li b{color:var(--ink);}
+  .hyp{display:grid; grid-template-columns:auto 1fr; gap:.35rem 1rem; max-width:70ch;
+    margin:.3rem 0 .2rem;}
+  .hyp dt{font-family:var(--mono); font-size:.64rem; letter-spacing:.13em;
+    text-transform:uppercase; color:var(--accent); padding-top:.42em; white-space:nowrap;}
+  .hyp dd{margin:0;}
+  .hyp dt.imp{color:var(--mark);}
+  strong{font-weight:650;}
+
+  /* key numbers */
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:1px;
+    background:var(--rule); border:1px solid var(--rule); margin:.4rem 0;}
+  .stat{background:var(--surface); padding:1.05rem 1.15rem; display:flex; flex-direction:column; gap:.3rem;}
+  .stat .v{font-family:var(--mono); font-size:1.5rem; font-weight:600; color:var(--ink);
+    letter-spacing:-.02em; font-variant-numeric:tabular-nums;}
+  .stat .v.hot{color:var(--mark);}
+  .stat .k{font-family:var(--mono); font-size:.68rem; text-transform:uppercase;
+    letter-spacing:.1em; color:var(--ink-3); line-height:1.4;}
+
+  /* figures */
+  figure{margin:1.2rem 0 .6rem; display:flex; flex-direction:column; gap:.7rem;}
+  figure img{width:100%; height:auto; display:block; background:#fcfcfb;
+    border:1px solid var(--rule); padding:6px;}
+  figcaption{font-family:var(--mono); font-size:.73rem; line-height:1.6; color:var(--ink-3);
+    max-width:78ch;}
+  figcaption b{color:var(--ink-2); font-weight:500;}
+
+  /* tables */
+  .tw{overflow-x:auto; margin:.5rem 0;}
+  table{border-collapse:collapse; width:100%; font-size:.86rem; min-width:min(100%,420px);}
+  caption{caption-side:top; text-align:left; font-family:var(--mono); font-size:.7rem;
+    text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); padding-bottom:.6rem;}
+  th,td{padding:.5rem .8rem; text-align:left; border-bottom:1px solid var(--rule);
+    vertical-align:baseline;}
+  th{font-family:var(--mono); font-size:.68rem; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--ink-3); font-weight:500; border-bottom:1px solid var(--rule-strong); white-space:nowrap;}
+  td.n,th.n{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right;}
+  tbody tr:last-child td{border-bottom:none;}
+  tr.hi td{background:var(--accent-soft);}
+  td .neg{color:var(--mark); font-family:var(--mono); font-size:.82rem;}
+  td .yes{color:var(--accent); font-family:var(--mono); font-size:.82rem;}
+
+  /* callout */
+  .note{border-left:2px solid var(--accent); background:var(--surface); padding:1rem 1.2rem;
+    display:flex; flex-direction:column; gap:.55rem; max-width:68ch;}
+  .note .eyebrow{color:var(--accent);}
+  .note.warn{border-left-color:var(--mark);}
+  .note.warn .eyebrow{color:var(--mark);}
+
+  code{font-family:var(--mono); font-size:.86em; background:var(--surface-2);
+    padding:.1em .35em; border:1px solid var(--rule);}
+  pre{font-family:var(--mono); font-size:.8rem; line-height:1.6; background:var(--surface);
+    border:1px solid var(--rule); padding:1rem 1.1rem; overflow-x:auto; margin:.3rem 0;}
+  pre code{background:none; border:none; padding:0;}
+
+  footer{margin-top:4rem; padding-top:1.4rem; border-top:1px solid var(--rule);
+    font-family:var(--mono); font-size:.72rem; color:var(--ink-3); line-height:1.7;}
+  ::selection{background:var(--accent); color:var(--ground);}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:3px;}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">Mechanistic study · nanoScaling</div>
+  <h1>Grokking in a non-abelian group: what actually changes at the transition</h1>
+  <p class="standfirst">Reproducing Power et al. (2022) and extending it to a new dataset:
+  composition in the dihedral group D<sub>48</sub>. Thirty-three runs across eight axes,
+  and one statistic that separates the networks that generalise from the ones that never do.</p>
+  <div class="byline">
+    <span><b>33</b> runs</span>
+    <span><b>19</b> figures</span>
+    <span><b>2-layer</b> transformer, 394,496 non-embedding params</span>
+    <span><b>1×</b> RTX 3090 Ti</span>
+  </div>
+</header>
+
+<div class="stats">
+  <div class="stat"><span class="v">17.7×</span><span class="k">grokking gap on the new task</span></div>
+  <div class="stat"><span class="v">24 → 3</span><span class="k">effective irreps at the transition</span></div>
+  <div class="stat"><span class="v hot">never</span><span class="k">generalises with weight decay off</span></div>
+  <div class="stat"><span class="v">5725<span style="color:var(--ink-3)">/5750</span></span><span class="k">grokking step, GDN vs attention</span></div>
+</div>
+
+<section style="margin-top:2.6rem;">
+  <div class="sec-head" style="border-top:none; padding-top:0;">
+    <span class="sec-num">&#9670;</span><h2>Headline findings</h2></div>
+  <p>Throughout, we describe grokking by its <b>gap</b>: the step at which the model first
+  scores 99% on the data it was trained on, divided by the step at which it first scores
+  99% on held-out data. A gap near 1 means it learned and generalised at the same time,
+  which is ordinary training. A gap of 17 means it sat at chance on held-out data for
+  seventeen times as long as it took to memorise.</p>
+  <ul class="findings">
+    <li><b>Grokking reproduces on a new dataset.</b> We built a task the original paper
+      never used: composing the symmetries of a 48-sided polygon (its rotations and flips),
+      presented to the network as 96 meaningless symbols with no hint of what they stand
+      for. The network learned all 2765 training examples by step 325 while still scoring at
+      chance on held-out ones, then jumped to perfect held-out accuracy at step 5750. A gap
+      of 17.7, reproduced on a second random seed.</li>
+    <li><b>Whether a task groks depends on how you train it, not just on the task.</b> The
+      identical dataset gave a gap of 1.05 (ordinary learning, no grokking at all) when we
+      showed the network half the multiplication table, 17.7 when we showed it 30%, and no
+      generalisation whatsoever within our budget at 20%. Weight decay and learning rate each
+      move it by a comparable amount on their own. So &ldquo;does model X grok on task
+      Y&rdquo; has no answer unless the training setup is specified too.</li>
+    <li><b>Most of the delay is just the learning rate.</b> We first believed a newer
+      optimiser, Muon, had abolished grokking, since it generalised almost immediately where
+      AdamW took 5750 steps. Sweeping the learning rate showed that plain AdamW does the same
+      thing if you simply turn it up: the gap falls from 17.7 to 1.0 as the learning rate goes
+      from 0.001 to 0.01. The long plateau is therefore mostly a symptom of taking small
+      steps, not a fundamental obstacle to learning the rule. Muon's genuine advantage is
+      narrower: it gives a small gap at every learning rate we tried, without tuning, and
+      stays stable where high-learning-rate AdamW falls apart.</li>
+    <li><b>At the jump, the network stops storing symbols and starts representing the
+      symmetry.</b> Group theory says any representation of a group breaks down into a fixed
+      set of irreducible building blocks, and this group has 27 of them. While memorising,
+      the network spreads its representation almost evenly across all 27, which is what an
+      unstructured lookup table looks like. At the moment held-out accuracy climbs, that
+      collapses onto about 3. Most of the surviving structure sits in the blocks encoding the
+      genuinely non-commutative part of the group, the part where swapping the two inputs
+      changes the answer.</li>
+    <li><b>That count predicts success better than anything else we measured.</b> Every run
+      that eventually generalised ended up using between 3 and 11 of the 27 building blocks.
+      Every run that never generalised stayed at 23 to 24, meaning essentially unstructured.
+      This held when we changed the optimiser, the learning rate, the weight decay, and even
+      when we replaced the attention mechanism with a different architecture entirely.</li>
+    <li><b>Weight decay is not background regularisation here, it is the cause.</b> Weight
+      decay is normally thought of as gentle pressure keeping weights small and discouraging
+      overfitting. Switch it off here and the network memorises at step 275 and then never
+      generalises, through 40,000 steps. It also behaves like a timer: whenever you switch it
+      on, generalisation arrives roughly 4000 to 5000 steps later, whether that is at step 0
+      or step 10,000. It has to act on the whole network, since decaying only the attention
+      layers, only the MLP, or only the embeddings all fail outright. And once the network
+      has generalised you can switch it off and the solution survives.</li>
+    <li><b>Grokking is not something attention does.</b> Replacing one of the two layers
+      with a completely different token-mixing mechanism, a gated linear recurrence, groks at
+      step 5725 against the baseline's 5750 and arrives at an equally compact representation.
+      Replacing both layers never groks at all, which we cannot explain.</li>
+    <li><b>Nothing warns you it is about to happen.</b> We looked for any statistic that
+      starts moving before held-out accuracy does, including one built specifically from the
+      group's own structure. Everything we measured moves at the jump, not before it. On this
+      task there is no early-warning signal to stop on.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">01</span><h2>What grokking is</h2></div>
+  <p>Grokking breaks the usual relationship between fitting and generalising. Train a
+  small transformer on a table of algebraic equations with some held out, and it reaches
+  perfect training accuracy within a few hundred steps while validation accuracy sits at
+  chance. The training loss goes flat. By every standard diagnostic the run is over: the
+  model has memorised a lookup table, and there is nothing left to learn.</p>
+  <p>Keep training and that turns out to be wrong. Thousands of steps after the training
+  loss stops moving, validation accuracy lifts off the floor and climbs to 100%. The
+  network that was storing answers is now computing them.</p>
+  <p>In our main run the two events are separated by a factor of 17.7. Training accuracy
+  passes 99% at step 325 and validation accuracy at step 5750, with some five thousand
+  steps in between during which the loss curve shows essentially nothing. Power et al.
+  (2022) named the effect and demonstrated it on modular arithmetic and on the symmetric
+  group S<sub>5</sub>.</p>
+  <p>Two things make it worth studying. Practically, every sensible stopping criterion
+  fires long before the interesting part, so the phenomenon is easy to train straight
+  past. Theoretically, weights that encode a memorised table become weights that encode an
+  algorithm without the loss registering the change, which suggests the structure that
+  matters is not visible in the loss at all.</p>
+  <p>This study asks what is different inside the network on either side of that jump, and
+  which knobs control when, and whether, it happens.</p>
+  <figure>
+    <img src="{{FIG:fig1_grokking_curves.png}}" alt="Training and validation accuracy against log optimisation steps for three tasks. Training accuracy saturates early in all three; validation accuracy on the dihedral task stays at chance for thousands of steps before jumping.">
+    <figcaption><b>Fig 1.</b> Train and validation accuracy on a log step axis. The shaded
+    band spans memorisation to generalisation. On D<sub>48</sub> (right) the network is at
+    100% training accuracy by step 325 and at chance on validation until roughly step 4000.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">02</span><h2>Setup</h2></div>
+  <p>Architecture and optimisation follow the paper's Appendix A.1.2, which we read rather
+  than reconstructed from memory, since the hyperparameters turn out to matter a great deal.</p>
+  <div class="tw">
+  <table>
+    <tbody>
+      <tr><th>Architecture</th><td>decoder-only transformer, causal mask, pre-LN</td></tr>
+      <tr><th>Layers / width / heads</th><td>2 / 128 / 4</td></tr>
+      <tr><th>Non-embedding params</th><td>394,496 (the paper says &ldquo;about 4&middot;10<sup>5</sup>&rdquo;)</td></tr>
+      <tr><th>Baseline optimiser</th><td>AdamW, lr 1e-3, &beta; = (0.9, 0.98), weight decay 1.0</td></tr>
+      <tr><th>Optimisers implemented</th><td>AdamW; Muon (Newton-Schulz orthogonalisation, hidden-only or all-2D routing); Adam with coupled L2; SGD with Nesterov momentum; RMSprop</td></tr>
+      <tr><th>Token mixers</th><td>softmax attention, Gated DeltaNet, or one of each</td></tr>
+      <tr><th>Schedule</th><td>10-step linear warmup, then constant. The paper deliberately does not anneal.</td></tr>
+      <tr><th>Batch</th><td>min(512, half the training set)</td></tr>
+      <tr><th>Hardware</th><td>one NVIDIA RTX 3090 Ti (24 GB), 16 CPU cores, PyTorch 2.7.1 / CUDA 12.6</td></tr>
+      <tr><th>Compute</th><td>&asymp;1.0M optimisation steps across 40 runs; roughly 10 hours of summed run time, a few hours elapsed at 8 to 13 concurrent jobs</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Equations are presented as abstract symbols with no internal structure. The network
+  sees opaque token ids, never a number, and has to infer the operation from the table
+  alone. The paper writes each equation as five tokens,
+  <code>&lang;x&rang;&lang;op&rang;&lang;y&rang;&lang;=&rang;&lang;x&SmallCircle;y&rang;</code>,
+  with loss on the answer only; we feed the four-token prefix and read logits at the last
+  position, which under a causal mask is the same computation.</p>
+  <p>One practical note, because it shaped how everything was run. At this size the model
+  cannot occupy a GPU: during training the 3090 Ti sat at 2% utilisation and idle clocks,
+  entirely CPU kernel-launch bound. That is slow for a single run (131 steps/s with fused
+  AdamW, 72 without) and ideal for a study, since a dozen runs execute concurrently without
+  contending for anything. The binding constraint on parallelism was CUDA context memory,
+  roughly 800 MB per process.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">03</span><h2>The dataset</h2></div>
+  <p>The paper's task list is modular arithmetic on ℤ<sub>97</sub> (eight bivariate
+  polynomials plus one conditional operation) and three operations on the symmetric group
+  S<sub>5</sub>. We wanted something outside that list, and settled on composition in the
+  <strong>dihedral group D<sub>48</sub></strong>.</p>
+  <p>D<sub>n</sub> is the symmetry group of a regular n-gon: n rotations and n reflections,
+  2n elements in total. Writing elements as r<sup>i</sup>s<sup>f</sup> with i ∈ ℤ<sub>n</sub>
+  and f ∈ {0,1}, the relation sr = r<sup>−1</sup>s gives</p>
+  <pre><code>(i, f) · (j, g) = ( i + (−1)^f · j  mod n ,  f ⊕ g )</code></pre>
+  <p>At n = 48 that is 96 elements and 9216 equations, chosen to sit close to the paper's
+  9409 so dataset size is not a confound. Rotations are indexed 0–47 and reflections 48–95,
+  keeping the two cosets contiguous for later analysis.</p>
+  <p>Three things made this attractive. It is non-abelian, so operand order matters. The
+  paper notes that symmetric operations are easier for a transformer, which can simply
+  ignore positional information, making the asymmetric case the more interesting one. It is
+  a semidirect product ℤ<sub>48</sub> ⋊ ℤ<sub>2</sub>, structurally between the cyclic
+  modular-arithmetic tasks and the S<sub>5</sub> tasks, duplicating neither. And it is
+  “half abelian”, which raised a question we could test: does the network learn the cyclic
+  factor and the reflection bit at different times? (It does not. They move together.)</p>
+  <p>We verified the generated operation table directly for closure, a two-sided identity,
+  unique inverses, associativity on 2000 random triples, and non-commutativity, before
+  training anything. <code>mod_div_97</code> (the paper's Figure 1 task) and
+  <code>mod_add_97</code> were kept as controls.</p>
+
+  <h3>The regime matters more than the task</h3>
+  <p>Our first D<sub>48</sub> run used 50% training data, the paper's Figure 1 split. It
+  memorised at step 475 and generalised at step 500. No gap, no grokking, just ordinary
+  learning. For about ten minutes it looked as though the new task simply did not exhibit
+  the phenomenon. It does; 50% data is just too much.</p>
+  <div class="tw">
+  <table>
+    <caption>Locating the regime: validation accuracy at step 4000</caption>
+    <thead><tr><th>Train fraction</th><th class="n">Memorised at</th><th class="n">Val acc @ 4000</th><th>Regime</th></tr></thead>
+    <tbody>
+      <tr><td class="n">0.15</td><td class="n">200</td><td class="n">0.002</td><td>memorised, no generalisation</td></tr>
+      <tr><td class="n">0.20</td><td class="n">300</td><td class="n">0.005</td><td>memorised, no generalisation</td></tr>
+      <tr><td class="n">0.25</td><td class="n">300</td><td class="n">0.018</td><td>memorised, no generalisation</td></tr>
+      <tr class="hi"><td class="n">0.30</td><td class="n">400</td><td class="n">0.737</td><td>mid-transition, chosen for the main runs</td></tr>
+      <tr><td class="n">0.40</td><td class="n">700</td><td class="n">1.000</td><td>grokked at step 2100</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note">
+    <div class="eyebrow">First real result</div>
+    <p>Grokking is a regime, not a property of a task. Asking “does D<sub>48</sub> grok?”
+    is not well-posed without specifying the data fraction, the weight decay and the
+    learning rate, each of which we later found moves the gap by more than an order of
+    magnitude on its own.</p>
+  </div>
+  <p>At 30% data, with the paper's hyperparameters: memorised at step 325, generalised at
+  step 5750. A gap of 17.7×, reproduced at a second seed (350 → 5800, 16.6×).</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">04</span><h2>How we scoped and instrumented the study</h2></div>
+
+  <h3>Framing and prioritisation</h3>
+  <p>The brief was open-ended: reproduce grokking and study it in as much detail as
+  possible, on a fixed time budget. Five decisions shaped what follows, and they are worth
+  stating because they constrain what the results can support.</p>
+  <ul>
+    <li><b>Reproduce before extending.</b> <code>mod_div_97</code> and <code>mod_add_97</code>
+      were run as controls from the start, so a new task failing to grok would be a finding
+      rather than an unattributable failure. That mattered, though not as intended: the
+      control disagrees with the paper by two orders of magnitude (&sect;8), so the analysis
+      rests on the new task instead.</li>
+    <li><b>One new dataset studied properly, rather than several sampled shallowly.</b>
+      Grokking runs are cheap, so the temptation is to add tasks. We took the opposite view:
+      one task with eight axes probed on it yields more than eight tasks with one axis each,
+      because the interesting claims are about what varies <em>within</em> a task.</li>
+    <li><b>Choose the dataset for analysability, not novelty alone.</b> D<sub>48</sub> is new
+      relative to the paper, but it was chosen because it is non-abelian (the harder regime
+      the paper flags), because it could be size-matched so dataset size is not a confound,
+      and because it has a known representation theory. That last point was speculative
+      insurance at the time and became the central result: when we needed a mechanistic
+      measure, one already existed for this group.</li>
+    <li><b>Find the regime before spending the budget.</b> The first run, at the paper's 50%
+      split, showed no grokking at all. Rather than assume the task was wrong we ran a cheap
+      scan over the training fraction with light logging, found the transition at 30%, and
+      only then committed the main runs. Roughly ten minutes of compute redirected the whole
+      study.</li>
+    <li><b>Let results reprioritise the plan.</b> Two of the eight axes were not in the
+      original plan. The learning-rate sweep was added because an optimiser comparison turned
+      out to be confounded, and the architecture axis because it tests whether any of this is
+      specific to attention. Both changed conclusions.</li>
+  </ul>
+  <p>Deliberately not done, and why: multi-seed everything (one axis of variance traded for
+  seven axes of coverage), depth and sequence-length sweeps (out of budget), and causal
+  ablation of the irrep structure (the analysis motivating it only existed near the end).</p>
+
+  <h3>The axes</h3>
+  <p>Eight axes, 33 runs.</p>
+  <ul>
+    <li><b>Training fraction</b> &nbsp;0.15, 0.20, 0.25, 0.30, 0.40, 0.50</li>
+    <li><b>Weight decay magnitude</b> &nbsp;0, 0.1, 1.0, 10</li>
+    <li><b>Weight decay timing</b> &nbsp;switched on at step 2000 or 10000, or off at step 8000</li>
+    <li><b>Weight decay locality</b> &nbsp;attention only, MLP only, or embeddings only</li>
+    <li><b>Learning rate</b> &nbsp;3e-4, 1e-3, 3e-3, 1e-2</li>
+    <li><b>Optimiser</b> &nbsp;AdamW, Muon (hidden-only or all-2D routing), Adam with coupled
+      L2, SGD with Nesterov momentum, RMSprop</li>
+    <li><b>Architecture</b> &nbsp;softmax attention or Gated DeltaNet in either layer</li>
+    <li><b>Seed</b> &nbsp;two seeds on the headline condition</li>
+  </ul>
+
+  <h3>Instrumentation: information per run</h3>
+  <p>Every run was treated as something that would be asked new questions later, because it was.</p>
+  <p><b>Two logging cadences.</b> Cheap statistics every 25 steps, expensive ones every 250.
+  The split exists because the transition has to be resolved densely, but SVDs and probes
+  cannot run at that rate. Measured overhead of the whole instrumentation: 131 steps/s down
+  to 96, about 27%, accepted deliberately rather than by default.</p>
+  <ul>
+    <li>Per-module weight norms, and the ratio to their value at initialisation</li>
+    <li>Per-module gradient norms</li>
+    <li>Grad-weight alignment, cos(&nabla;L, W), separating growing the norm from rotating
+      the solution</li>
+    <li>Update geometry: step size, and the cosine between consecutive updates</li>
+    <li>Logit magnitudes and correct-class margins on train and validation</li>
+    <li>Singular spectra of the embedding, unembedding and MLP matrices, with stable and
+      effective rank</li>
+    <li>Fourier concentration of the embedding over the cyclic subgroup</li>
+    <li>MLP activation sparsity (Gini coefficient) and dead-neuron fraction</li>
+    <li>Embedding variance explained by the top two principal components</li>
+    <li>Decomposition into the 27 irreducible representations of D<sub>48</sub></li>
+  </ul>
+  <div class="note">
+    <div class="eyebrow">The decision that paid off most</div>
+    <p><b>Full checkpoints on a log-spaced grid, about 40 per run.</b> The irrep analysis,
+    which produced the central mechanistic result of the study, was conceived and written
+    <em>after every run had finished</em>, and cost <b>zero additional GPU time</b>: it reads
+    checkpoints already on disk. The same is true of the transition-aligned comparison and
+    the faithfulness check. A study that logged only scalars would have had to retrain
+    everything to ask those questions.</p>
+  </div>
+  <p><b>One schema for every run.</b> Identical CSV columns across all 33 runs is what makes
+  cross-run analysis possible at all, including rescaling four runs by their own transition
+  points and overlaying them (&sect;5.4), which was not planned in advance.</p>
+  <p><b>Line-buffered, append-mode CSVs.</b> The analysis code was developed against partial
+  results while runs were still going, so figure debugging overlapped with training instead
+  of following it.</p>
+  <p><b>Concurrency chosen from a measurement, not a guess.</b> Profiling showed the GPU at
+  2% utilisation and idle clocks: the workload is CPU launch-bound, so 8 to 13 runs execute
+  concurrently without contending for compute, and the binding constraint is CUDA context
+  memory at about 800 MB per process. The same profiling picked fused over unfused AdamW,
+  worth 1.8&times;, and rejected CUDA graphs despite a further 2.6&times; because they would
+  have broken the activation capture.</p>
+  <p><b>Budget set by calibration.</b> Throughput was measured before the grid was launched
+  and the step budget set from it, rather than picking a round number and hoping.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">05</span><h2>Results</h2></div>
+  <p>Each subsection states the hypothesis we went in with, what was actually varied to
+  test it, what came out, and what it changes about the overall picture.</p>
+
+  <h3>5.1 &nbsp;Data efficiency</h3>
+  <dl class="hyp">
+    <dt>Hypothesis</dt><dd>The paper reports that optimisation time to generalise grows sharply as the training fraction falls, while time to memorise does not. That should hold on a task they never ran, if the effect is general rather than specific to modular arithmetic.</dd>
+    <dt>Test</dt><dd>D<sub>48</sub> at training fractions 0.15 through 0.50, everything else held at the paper's settings, recording the step at which train and validation accuracy each pass 99%.</dd>
+    <dt>Finding</dt><dd>Memorisation time barely moves: 225 steps at 20% data, 675 at 40%. Generalisation time explodes: 2100 steps at 40%, 5750 at 30%, and nothing within 40,750 steps at 20%.</dd>
+    <dt class="imp">Implication</dt><dd>The gap is not a property of the task, it is a property of how much of the operation table the network can see. This forces the regime framing used everywhere below: the same dataset is a grokking dataset or an ordinary one depending on the split.</dd>
+  </dl>
+  <figure>
+    <img src="{{FIG:fig8_data_efficiency.png}}" alt="Steps to memorise and steps to generalise against training data fraction, log y axis. The memorisation curve is nearly flat; the generalisation curve rises steeply as data decreases.">
+    <figcaption><b>Fig 2.</b> Steps to memorise (flat) against steps to generalise
+    (explodes) as training data is removed. Open triangles mark runs that never grokked
+    within budget.</figcaption>
+  </figure>
+
+  <h3>5.2 &nbsp;Weight decay</h3>
+  <dl class="hyp">
+    <dt>Hypothesis</dt><dd>The paper finds weight decay &ldquo;particularly effective at improving data efficiency&rdquo;, which reads as a regulariser biasing the network toward the simpler solution. On that account more decay should shift the transition earlier, roughly in proportion to how much the weights are shrunk.</dd>
+    <dt>Test</dt><dd>Four manipulations. <b>Magnitude</b> at 0, 0.1, 1.0, 10. <b>Onset</b>: train with no decay, switch it on at step 2000 or 10,000. <b>Removal</b>: switch it off at step 8000, after the transition. <b>Locality</b>: restrict decay to the attention matrices, the MLP, or the embeddings. Plus matched <code>lr&middot;wd</code> products, since decoupled AdamW shrinks weights by w &larr; w(1 &minus; lr&middot;wd) per step.</dd>
+    <dt>Finding</dt><dd>Magnitude sets the timescale steeply: 5750 steps at wd = 1.0, 31,550 at wd = 0.1, and no generalisation at all in 40,600 steps at wd = 0, despite perfect memorisation by step 275. Because memorisation time barely moves, the wd = 0.1 run has a gap of 114.7&times;, the largest we recorded. Onset, locality and removal below.</dd>
+  </dl>
+  <figure>
+    <img src="{{FIG:fig18_weight_decay_study.png}}" alt="Three panels: late-onset weight decay, module-selective decay, and decay removed after grokking.">
+    <figcaption><b>Fig 3.</b> Weight decay from three directions. <b>(a)</b> switching decay
+    on late simply restarts the clock; <b>(b)</b> decaying any single module family fails
+    outright; <b>(c)</b> removing decay after the transition costs nothing.</figcaption>
+  </figure>
+  <div class="tw">
+  <table>
+    <caption>Onset: the transition clock starts when decay starts</caption>
+    <thead><tr><th>Decay on at</th><th class="n">Memorised</th><th class="n">Grokked</th><th class="n">Steps after onset</th></tr></thead>
+    <tbody>
+      <tr><td class="n">0</td><td class="n">325</td><td class="n">5750</td><td class="n">5750</td></tr>
+      <tr><td class="n">2000</td><td class="n">275</td><td class="n">7325</td><td class="n">5325</td></tr>
+      <tr><td class="n">10000</td><td class="n">275</td><td class="n">14150</td><td class="n">4150</td></tr>
+      <tr><td>never</td><td class="n">275</td><td><span class="neg">never</span></td><td></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Locality produced a clean negative: attention-only, MLP-only and embedding-only decay
+  all memorise at step 275 and none generalise across the full 30,000 steps. Removal showed
+  an asymmetry: switch decay off after the transition and validation accuracy stays at
+  1.000. The product rule holds only locally, with (3e-3, 0.333) groking at 6150 against
+  5750 for (1e-3, 1.0), but (1e-2, 0.1) taking 10,525 steps and (1e-3, 10) failing to fit
+  the training set at all.</p>
+  <dl class="hyp">
+    <dt class="imp">Implication</dt><dd>Weight decay is not biasing the endpoint of an otherwise unchanged optimisation, it is driving the transition. The memorising solution is a stable attractor that persists indefinitely when left alone, and decay dislodges it on its own timescale rather than tipping it out immediately. The locality result is the sharpest constraint on any mechanistic story: whatever decay does, it cannot be &ldquo;shrink the module that grew&rdquo;, because the entire norm rise is carried by attention (&sect;5.4) and decaying attention alone does nothing.</dd>
+  </dl>
+
+  <h3>5.3 &nbsp;Learning rate and optimiser</h3>
+  <dl class="hyp">
+    <dt>Hypothesis</dt><dd>Ours, and it turned out to be wrong. Muon constrains the spectral geometry of each update, so if grokking is the slow removal of a high-norm memorising solution, a different update geometry might skip that phase. Muon at its standard 0.02 gave a gap of 1.4&times; against AdamW's 17.7&times;, which looked like a clean optimiser effect.</dd>
+    <dt>Test</dt><dd>Sweep the learning rate for both, rather than comparing one setting each. Muon's Newton-Schulz update carries roughly unit <em>spectral</em> norm and AdamW's roughly unit <em>max-abs</em> norm, so their learning rates are not on a common scale and matching them numerically would be the unfair comparison, not the fair one.</dd>
+  </dl>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Optimiser</th><th class="n">lr</th><th class="n">Memorised</th><th class="n">Grokked</th><th class="n">Gap</th><th>Stable at end</th></tr></thead>
+    <tbody>
+      <tr><td>AdamW</td><td class="n">3e-4</td><td class="n">450</td><td><span class="neg">never in 30k</span></td><td class="n"></td><td>yes</td></tr>
+      <tr><td>AdamW</td><td class="n">1e-3</td><td class="n">325</td><td class="n">5750</td><td class="n">17.7&times;</td><td>yes</td></tr>
+      <tr><td>AdamW</td><td class="n">3e-3</td><td class="n">775</td><td class="n">2625</td><td class="n">3.4&times;</td><td>yes</td></tr>
+      <tr><td>AdamW</td><td class="n">1e-2</td><td class="n">850</td><td class="n">875</td><td class="n">1.0&times;</td><td><span class="neg">no, ends at 33%</span></td></tr>
+      <tr class="hi"><td>Muon</td><td class="n">5e-3</td><td class="n">325</td><td class="n">500</td><td class="n">1.5&times;</td><td>yes</td></tr>
+      <tr class="hi"><td>Muon</td><td class="n">2e-2</td><td class="n">350</td><td class="n">450</td><td class="n">1.3&times;</td><td>yes</td></tr>
+      <tr class="hi"><td>Muon</td><td class="n">5e-2</td><td class="n">225</td><td class="n">325</td><td class="n">1.4&times;</td><td>yes</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="{{FIG:fig12_lr_sweep.png}}" alt="Left: memorisation and generalisation steps against learning rate for AdamW and Muon. Right: grokking gap against learning rate; the AdamW curve falls steeply from 17.7 to 1.0 while the Muon curves stay flat near 1.4.">
+    <figcaption><b>Fig 4.</b> The AdamW gap collapses from 17.7&times; to 1.0&times; across
+    one decade of learning rate; Muon sits near 1.4&times; throughout.</figcaption>
+  </figure>
+  <dl class="hyp">
+    <dt>Finding</dt><dd>AdamW at 1e-2 also reaches a gap of 1.0, so the hypothesis as stated is false. What survives is narrower: Muon is <em>insensitive</em>, holding 1.3 to 1.5&times; across a tenfold range, while AdamW swings from 17.7&times; to 1.0&times; and its zero-gap point is unstable, collapsing to 33% training accuracy after having reached 100%. A detail that also killed our supporting argument: as the AdamW learning rate rises, memorisation time <em>increases</em> (325 to 850) while generalisation time <em>falls</em> (5750 to 875), so &ldquo;memorisation time is unchanged under Muon&rdquo; never ruled out a step-size explanation, though we had used it that way.</dd>
+    <dt class="imp">Implication</dt><dd>Most of the delay is an optimisation artefact rather than a fundamental barrier to learning the rule. The long plateau is not the network needing time to discover the algorithm, it is the optimiser taking a slow path to something reachable much faster under other settings. It raises the question &sect;5.5 answers, of whether the fast and slow paths arrive at the same place.</dd>
+  </dl>
+
+  <h3>5.4 &nbsp;What moves at the transition</h3>
+  <dl class="hyp">
+    <dt>Hypothesis</dt><dd>The standard account is that the weight norm grows while the network memorises and then falls as decay pushes it onto the general solution. If so, the global norm should peak at the transition and the internal statistics should show a characteristic signature there.</dd>
+    <dt>Test</dt><dd>Per-module weight and gradient norms at 25-step resolution, and then a stronger version: rescale each run's step axis by its own t<sub>grok</sub> and overlay runs that grok at very different times. If the signature belongs to the transition rather than the run, the curves should collapse.</dd>
+  </dl>
+  <div class="tw">
+  <table>
+    <caption>Per-module weight norm through the transition</caption>
+    <thead><tr><th>Module</th><th class="n">At memorisation</th><th class="n">Peak</th><th class="n">Final</th><th>Behaviour</th></tr></thead>
+    <tbody>
+      <tr class="hi"><td>Attention QKV</td><td class="n">10.22</td><td class="n">27.07 <span style="color:var(--ink-3)">(step 3750)</span></td><td class="n">16.86</td><td>grows, then shrinks</td></tr>
+      <tr><td>Unembedding</td><td class="n">9.86</td><td class="n">18.58</td><td class="n">17.42</td><td>grows, then flat</td></tr>
+      <tr><td>MLP fc</td><td class="n">10.47</td><td class="n">10.81</td><td class="n">4.42</td><td>shrinks throughout</td></tr>
+      <tr><td>MLP proj</td><td class="n">8.07</td><td class="n">8.07</td><td class="n">3.26</td><td>shrinks throughout</td></tr>
+      <tr><td>Token embedding</td><td class="n">2.70</td><td class="n">2.74</td><td class="n">1.34</td><td>shrinks throughout</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="{{FIG:fig15_emergence_zoom.png}}" alt="Four stacked panels on a linear step axis around the transition: accuracy, global weight norm, per-module weight norms, and gradient norm.">
+    <figcaption><b>Fig 5.</b> Linear-axis zoom on the emergence. The per-module panel shows
+    attention QKV driving the entire rise while the MLP norms decline throughout.</figcaption>
+  </figure>
+  <figure>
+    <img src="{{FIG:fig13_transition_aligned.png}}" alt="Eight panels of statistics with each run's step axis rescaled by its own grokking step; curves from four runs collapse onto each other.">
+    <figcaption><b>Fig 6.</b> Four runs grokking at 2100, 2625, 5750 and 31,550 steps,
+    rescaled by their own transition points, collapse onto essentially one curve.</figcaption>
+  </figure>
+  <dl class="hyp">
+    <dt>Finding</dt><dd>The global story holds: 28.0, peaking at 34.4 around step 3750 just as validation accuracy starts to move, then down to 26.5. But it is carried almost entirely by attention QKV; the MLP and embedding norms decline monotonically from the start and never participate. The alignment test worked better than expected, with four runs spanning a 15&times; range in timing collapsing onto one curve for accuracy, Fourier concentration, effective rank and PCA variance alike. Two details are visible only there: the global norm peaks slightly <em>before</em> the jump, at about 0.85&middot;t<sub>grok</sub>, and cos(&nabla;L, W) dips sharply negative exactly at it.</dd>
+    <dt class="imp">Implication</dt><dd>Whatever sets <em>when</em> grokking happens, <em>what happens</em> internally is the same event every time, which justifies treating it as one phenomenon across a 15&times; spread in timing. The per-module breakdown localises the memorising solution to attention, and sets up the tension with &sect;5.2: attention holds the memorised content, yet decaying attention alone will not remove it.</dd>
+  </dl>
+
+  <h3>5.5 &nbsp;The mechanism</h3>
+  <dl class="hyp">
+    <dt>Hypothesis</dt><dd>If the network has learned the group rather than the table, its representation of the elements should be sparse in the group's own natural basis. For a cyclic group that is the Fourier basis; for a non-abelian group it is the decomposition into irreducible representations, which the cyclic Fourier measure we had been using structurally cannot see. And if hidden progress happens anywhere during the plateau, this is the measure that should reveal it.</dd>
+    <dt>Test</dt><dd>D<sub>48</sub> has 27 irreps, four one-dimensional and twenty-three two-dimensional, with 4&middot;1 + 23&middot;4 = 96 = |G|. Treating each of the 128 embedding dimensions as a function on the group, decompose the power across irreps at every saved checkpoint, checking each against Parseval. Summarise with the effective number of irreps in use, the inverse Simpson index of the power spectrum: 27 means uniform, so no group structure, and 1 means a single irrep carries everything.</dd>
+  </dl>
+  <div class="tw">
+  <table>
+    <caption>The collapse happens at the transition, not during the plateau</caption>
+    <tbody>
+      <tr><th>Memorised</th><td class="n">step 325</td></tr>
+      <tr><th>Effective irreps across the whole plateau (325 to 2000)</th><td class="n">flat at 23.4 to 24.3</td></tr>
+      <tr><th>Validation accuracy &gt; 0.05</th><td class="n">step 3100</td></tr>
+      <tr><th>Effective irreps first below 20</th><td class="n">step 4117</td></tr>
+      <tr><th>Validation accuracy &gt; 0.99</th><td class="n">step 5750</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="{{FIG:fig16_irrep_progress.png}}" alt="Three stacked panels: validation accuracy, effective number of irreps, and power in the top three irreps, for a grokking run and a weight-decay-free run.">
+    <figcaption><b>Fig 7.</b> The grokking run (blue) is flat at ~24 effective irreps
+    through the entire plateau and collapses to ~3 at the transition; the weight-decay-free
+    run (orange) never leaves 24.</figcaption>
+  </figure>
+  <div class="tw">
+  <table>
+    <caption>Every grokked run is sparse, on a different set of irreps</caption>
+    <thead><tr><th>Run</th><th class="n">Grokked at</th><th class="n">Effective irreps</th><th>Dominant</th></tr></thead>
+    <tbody>
+      <tr><td>AdamW 1e-3</td><td class="n">5750</td><td class="n">3.1</td><td>&rho;<sub>21</sub>, &rho;<sub>22</sub></td></tr>
+      <tr><td>AdamW 3e-3</td><td class="n">2625</td><td class="n">2.8</td><td>&rho;<sub>3</sub></td></tr>
+      <tr><td>AdamW 1e-2</td><td class="n">875</td><td class="n">3.3</td><td>&rho;<sub>17</sub></td></tr>
+      <tr><td>AdamW wd 0.1</td><td class="n">31550</td><td class="n">6.2</td><td>&rho;<sub>21</sub>, &rho;<sub>7</sub></td></tr>
+      <tr><td>Muon 0.02</td><td class="n">450</td><td class="n">5.0</td><td>&rho;<sub>2</sub>, &rho;<sub>6</sub></td></tr>
+      <tr><td>Muon 0.05</td><td class="n">325</td><td class="n">3.9</td><td>&rho;<sub>1</sub>, &rho;<sub>19</sub></td></tr>
+      <tr class="hi"><td>AdamW wd 0</td><td><span class="neg">never</span></td><td class="n">23.7</td><td>none, uniform</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>A follow-up check sharpens what &ldquo;sparse&rdquo; means. We asked whether the
+  surviving irreps are <em>sufficient</em>, that is whether they can still tell all 96 group
+  elements apart. Neither of the top two is faithful on its own: &rho;<sub>21</sub> collapses
+  the group 3-to-1, since gcd(21, 48) = 3 means it cannot distinguish r<sup>i</sup> from
+  r<sup>i+16</sup>, and &rho;<sub>22</sub> collapses it 2-to-1. Their blind spots are coprime,
+  so together they separate all 96. The network did not merely become sparse, it compressed
+  to the minimum structure sufficient to represent the group faithfully, and stopped there.</p>
+  <div class="tw">
+  <table>
+    <caption>Are the surviving irreps enough to distinguish the group?</caption>
+    <thead><tr><th>Irreps kept</th><th class="n">Elements separated</th></tr></thead>
+    <tbody>
+      <tr><td>&rho;<sub>21</sub> alone</td><td class="n">32 of 96</td></tr>
+      <tr class="hi"><td>&rho;<sub>21</sub> + &rho;<sub>22</sub></td><td class="n">96 of 96, faithful</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="{{FIG:fig17_irrep_solutions.png}}" alt="Heatmap of the share of embedding power per irrep across runs, beside a bar chart of the effective number of irreps for each.">
+    <figcaption><b>Fig 8.</b> Share of embedding power per irrep. Every run that groks
+    concentrates on a handful; which handful varies by optimiser and learning rate.</figcaption>
+  </figure>
+  <dl class="hyp">
+    <dt>Finding</dt><dd>The embedding is unstructured in the group basis through the entire plateau, then collapses from 24 to about 3 in lockstep with the accuracy jump. In the grokked network 87% of the power sits in <em>two-dimensional</em> irreps, precisely the non-abelian structure the cyclic measure was blind to. The wd = 0 run sits at 23.7 for its entire 40,000 steps. And every grokked run is sparse on a <em>different</em> set of irreps.</dd>
+    <dt class="imp">Implication</dt><dd>This is the mechanism the rest of the study was circling: grokking here is the collapse of a high-rank, group-unstructured memorising solution onto a sparse set of irreducible representations, and the effective irrep count is the best single discriminator we found between runs that generalise and runs that never do. It answers &sect;5.3's open question, and not as expected. Universality of form, not of content: the algorithm class is invariant while the representation basis is not, so learning rate and optimiser select among many equivalent sparse solutions rather than changing the path length to one. It also sharpens the negative result, since even this measure is flat through the plateau.</dd>
+  </dl>
+
+  <h3>5.6 &nbsp;Is grokking a property of attention?</h3>
+  <dl class="hyp">
+    <dt>Hypothesis</dt><dd>Every result so far comes from a softmax-attention transformer. If the phenomenon depends on attention's particular inductive bias, replacing the token mixer should change or remove it. If instead it belongs to the task and the optimisation, a different mixer should grok too.</dd>
+    <dt>Test</dt><dd>Keep the depth at two layers and swap one or both layers for a Gated DeltaNet, a gated linear attention with a matrix-valued recurrent state. All variants stay within 0.55% of the baseline parameter count, so capacity is not the variable.</dd>
+  </dl>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Layers</th><th class="n">Memorised</th><th class="n">Grokked</th><th class="n">Effective irreps</th></tr></thead>
+    <tbody>
+      <tr><td>attention, attention</td><td class="n">325</td><td class="n">5750</td><td class="n">3.1</td></tr>
+      <tr class="hi"><td>attention, GDN</td><td class="n">725</td><td class="n">5725</td><td class="n">3.2</td></tr>
+      <tr><td>GDN, attention</td><td class="n">275</td><td class="n">7325</td><td class="n">11.4</td></tr>
+      <tr><td>GDN, GDN</td><td class="n">650</td><td><span class="neg">never</span></td><td class="n">22.9</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <figure>
+    <img src="{{FIG:fig19_token_mixer.png}}" alt="Left: validation accuracy curves for four architectures. Right: bar chart of the effective number of irreps for each; the three that grok are low, the pure-GDN model is near 23.">
+    <figcaption><b>Fig 9.</b> Swapping the token mixer. The attention+GDN hybrid tracks the
+    baseline almost exactly. Pure GDN memorises and stays unstructured.</figcaption>
+  </figure>
+  <dl class="hyp">
+    <dt>Finding</dt><dd>One attention layer plus one GDN layer groks at step 5725 against the baseline's 5750, a 0.4% difference, and lands on 3.2 effective irreps against 3.1, on a different set. Pure GDN memorises at step 650 and never generalises, sitting at 22.9 effective irreps: the same unstructured signature as training with no weight decay.</dd>
+    <dt class="imp">Implication</dt><dd>Neither grokking nor the sparse group-representation solution is specific to softmax attention, which makes it a property of the task and the optimisation rather than of one architecture. The hybrid independently reproduces the form-not-content result from &sect;5.5. The pure-GDN failure is the loose end: one attention layer appears necessary and one sufficient, and we have no explanation. Scope caveat: at four tokens GDN's actual advantage, a fixed-size recurrent state replacing quadratic attention over long contexts, is inert, so this is a token-mixer ablation and not a statement about GDN as a long-context mechanism.</dd>
+  </dl>
+
+  <h3>5.7 &nbsp;Three hypotheses that did not survive</h3>
+  <p><b>Post-grokking instability.</b> Our accuracy curves oscillate violently after the
+  transition, dropping from 1.0 to 0.2 and recovering, which the paper's do not. The
+  obvious suspect was weight decay applied to LayerNorm gains: with the loss near zero
+  there is no gradient to oppose the decay, so the normalisation scale is driven toward
+  zero. We tested it by excluding one-dimensional parameters from decay. The mechanism is
+  real, the LayerNorm norm falls from 27 to 7 when decayed and grows to 60 when excluded,
+  but the oscillation did not go away. Over the post-transition window the &ldquo;fixed&rdquo;
+  run has 14.1% of evaluations below 0.95 against the original's 12.0%. Rejected. Our
+  remaining guess is the constant learning rate, which the paper explicitly chose not to
+  anneal, and we did not test it.</p>
+  <p><b>An early-warning signal.</b> We expected something to move before the accuracy
+  jump. Measuring what fraction of each statistic's total change falls inside the window
+  [0.3, 2.0]&middot;t<sub>grok</sub>: validation accuracy 0.99, Fourier concentration 0.87,
+  embedding effective rank 0.81, PCA variance 0.79. The structural measures are step-like
+  and essentially simultaneous with the jump, and &sect;5.5 shows the same for the irrep
+  decomposition. Nothing we measured anticipates the transition.</p>
+  <p><b>A probe that measured nothing.</b> A linear probe for the reflection bit of
+  D<sub>48</sub> read 1.00 from step 0. Ninety-six points in 128 dimensions are linearly
+  separable under any binary labelling at random initialisation, so the probe was
+  uninformative by construction rather than telling us the &#8484;<sub>2</sub> factor was
+  learned early.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">06</span><h2>What we got wrong</h2></div>
+  <p>Three conclusions in this study were wrong until measured, and all three were caught
+  the same way, by computing a number instead of trusting a plot.</p>
+  <p>The LayerNorm explanation above looked obviously right in the figure; the statistics
+  said otherwise. The claim that Muon abolishes grokking survived until someone asked why
+  its learning rate was twenty times AdamW's, and an LR sweep showed AdamW does the same
+  thing at 1e-2. And an early version of our event-ordering figure implied several
+  statistics led the accuracy jump, which was an artefact of the metric: “step at which half
+  the total change is complete” fires early for anything drifting monotonically, which is
+  drift, not anticipation.</p>
+  <div class="note warn">
+    <div class="eyebrow">Two bugs with real consequences</div>
+    <p>Our Muon parameter routing sent the token embedding and output head to Muon, against
+    standard practice, which mattered because the embedding is exactly where we measure
+    structure, so orthogonalising its update could have manufactured the result. It did not,
+    as it happens: restricting Muon to hidden matrices gives 1.3× against 1.4×. Separately,
+    the module-grouping code did not recognise GDN parameter names, so it would have
+    silently dropped every GDN weight from the norm statistics. That one was caught by
+    asserting that the per-group parameter counts sum to the model's total.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">07</span><h2>Conclusions</h2></div>
+  <p><strong>Grokking is a regime, not a task property.</strong> The same dataset shows a
+  gap of 1.05× at 50% data, 17.7× at 30%, and no generalisation at all at 20%. Weight decay,
+  learning rate and data fraction each move the transition by more than an order of
+  magnitude independently. Any statement of the form “model X groks on task Y” is
+  underspecified.</p>
+  <p><strong>The delay is largely an optimisation artefact rather than a fundamental
+  barrier.</strong> It can be tuned away: AdamW spans 17.7× to 1.0× over one decade of
+  learning rate, and Muon sits near 1.3× across a tenfold range while staying stable. The
+  long plateau is not the network needing time to find the rule; it is the optimiser taking
+  a slow path to a solution reachable much faster under other settings.</p>
+  <p><strong>The transition is a collapse from high-rank memorisation onto a sparse set of
+  irreducible representations.</strong> Embedding effective rank falls from 85 to 35, the
+  representation goes from 24 effective irreps to about 3, and 87% of the surviving power
+  sits in two-dimensional irreps. Every grokked run finds three to eleven; every
+  non-generalising run stays at 23–24. Across optimisers, learning rates, weight decays and
+  architectures, that single number separates the two outcomes better than anything else we
+  measured.</p>
+  <p><strong>Weight decay is a mechanism, not a regulariser.</strong> It must act on all
+  modules; decaying attention alone fails, despite attention carrying the entire norm rise.
+  It starts the transition clock when it is switched on, whenever that is. And it is
+  required to reach the solution but not to maintain it.</p>
+  <p><strong>Nothing anticipates the jump.</strong> Neither generic statistics nor the
+  task-specific representation-theoretic measure show progress during the plateau. If a
+  usable early-warning signal for grokking exists, it is not in anything we measured here.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">08</span><h2>What is still uncertain</h2></div>
+  <h3>Open questions</h3>
+  <p>What we would test next, roughly in order of how much it would change the picture.</p>
+  <ul>
+    <li><b>Is the irrep collapse causal, or a correlate?</b> We never intervened on it. The
+      test is ablation: zero every irrep component except the dominant few and check whether
+      validation accuracy survives, then force a sparse representation early and see whether
+      generalisation follows. Until that is run, &ldquo;the transition is a collapse onto a
+      few irreps&rdquo; describes what co-occurs with generalisation, not what causes it.</li>
+    <li><b>Why does pure Gated DeltaNet fail?</b> It memorises normally and then stays at
+      22.9 effective irreps forever, the same signature as training without weight decay. One
+      attention layer is enough to fix it. We have no account of what attention supplies that
+      the recurrence does not, and this is the most conspicuous loose end in the study.</li>
+    <li><b>Why does our <code>mod_div_97</code> control disagree with the paper by 100&times;?</b>
+      It groks at step 725 against roughly 10<sup>5</sup> in their Figure 1, on hyperparameters
+      matched to their appendix. The ordering is right and the magnitude is not. Candidate
+      causes are initialisation scale and their unstated handling of weight decay on 1-D
+      parameters, neither tested.</li>
+    <li><b>What causes the post-grokking oscillation?</b> Our leading hypothesis was tested
+      and rejected (&sect;5.7). The remaining suspect is the constant learning rate, which the
+      paper explicitly chose not to anneal. One annealing run would settle it.</li>
+    <li><b>Is there an early-warning signal in a measure we did not try?</b> Nothing we
+      logged moves before the jump. The obvious untried candidate is restricted and excluded
+      loss: project the weights onto the dominant irrep subspace and its complement and
+      evaluate each. If the restricted loss falls during the plateau, the circuit is forming
+      invisibly after all, and our negative result is a statement about our measures rather
+      than about the network.</li>
+    <li><b>Which irreps, and why those?</b> Every grokked run picks a small set, and
+      different runs pick different sets. Whether the choice is arbitrary, seeded by
+      initialisation, or structured (the two dominant ones here have coprime kernels, exactly
+      the condition for their sum to be faithful) is not answerable from thirteen runs.</li>
+    <li><b>Does any of this depend on depth?</b> Everything here is two layers.</li>
+  </ul>
+  <h3>Limitations on what we do claim</h3>
+  <p>Most ablations are single-seed; only the headline D<sub>48</sub> condition was repeated.
+  Every &ldquo;never groks&rdquo; means within the step budget used, 30,000 to 40,850 steps,
+  and is not a proof of impossibility. The whole study is at two layers and four-token
+  sequences, so nothing here speaks to depth or sequence length, and in particular the Gated
+  DeltaNet comparison says nothing about its behaviour as a long-context mechanism. The
+  coupled-L2 optimisers were run at one learning rate each and are confounded with the decay
+  coupling, so their failures should not be read as statements about SGD or RMSprop. The
+  irrep measure is computed on the token embedding only, not on the full computation. And it
+  is task-specific by construction: it exists because D<sub>48</sub> is a group with known
+  representation theory, so it is not a general-purpose grokking detector.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">09</span><h2>Reproducing</h2></div>
+<pre><code>python data.py           # verify the group axioms and dataset sizes
+python model.py          # verify the parameter count
+python gdn.py            # verify the Gated DeltaNet layer is causal
+bash run_grid.sh         # all runs (stagger the launches)
+python analysis.py       # regenerate every figure into figures/</code></pre>
+  <p>33 runs, <code>results_summary.csv</code> for the full table,
+  <code>analysis.ipynb</code> for the same figures interactively, and
+  <code>EXPERIMENT_LOG.md</code> for the blow-by-blow including the parts that went wrong.</p>
+</section>
+
+<footer>
+  Power, Burda, Edwards, Babuschkin &amp; Misra (2022), “Grokking: Generalization Beyond
+  Overfitting on Small Algorithmic Datasets”, arXiv:2201.02177.<br>
+  Study run on a single RTX 3090 Ti · 33 runs · 19 figures · nanoScaling/experiments/grokking
+</footer>
+
+</div>
